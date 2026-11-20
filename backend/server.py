@@ -1,0 +1,393 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+import asyncio
+import json
+import logging
+import os
+import time
+import uuid
+from contextlib import suppress
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+
+import bcrypt
+import httpx
+import jwt
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, Query
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
+from pywebpush import webpush, WebPushException
+from starlette.middleware.cors import CORSMiddleware
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("epochveras")
+
+client = AsyncIOMotorClient(os.environ['MONGO_URL'])
+db = client[os.environ['DB_NAME']]
+BINANCE = os.environ['BINANCE_BASE']
+JWT_SECRET = os.environ['JWT_SECRET']
+
+app = FastAPI()
+api = APIRouter(prefix="/api")
+http: Optional[httpx.AsyncClient] = None
+LAST_PRICES: Dict[str, float] = {}
+PUSH_TASKS: set = set()
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@api.get("/health")
+async def health():
+    return {"ok": True, "prices": len(LAST_PRICES)}
+
+
+# ---------------- auth ----------------
+def hash_password(p: str) -> str:
+    return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(p: str, h: str) -> bool:
+    return bcrypt.checkpw(p.encode(), h.encode())
+
+
+def make_token(uid: str, email: str) -> str:
+    payload = {"sub": uid, "email": email, "type": "access", "exp": datetime.now(timezone.utc) + timedelta(days=30)}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+async def current_user(request: Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.startswith("Bearer ") else request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(401, "Oturum yok")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Oturum süresi doldu")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Geçersiz oturum")
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(401, "Kullanıcı bulunamadı")
+    return user
+
+
+class AuthIn(BaseModel):
+    email: str
+    password: str = Field(min_length=6)
+    name: Optional[str] = None
+
+
+def public_user(u: dict) -> dict:
+    return {"id": u["id"], "email": u["email"], "name": u.get("name") or u["email"].split("@")[0], "role": u.get("role", "user")}
+
+
+@api.post("/auth/register")
+async def register(body: AuthIn):
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "Geçerli bir e-posta girin")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Bu e-posta zaten kayıtlı")
+    u = {"id": str(uuid.uuid4()), "email": email, "name": body.name or email.split("@")[0],
+         "password_hash": hash_password(body.password), "role": "user", "created_at": now_iso()}
+    await db.users.insert_one(u)
+    return {"token": make_token(u["id"], email), "user": public_user(u)}
+
+
+@api.post("/auth/login")
+async def login(body: AuthIn, request: Request):
+    email = body.email.strip().lower()
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    ident = f"{fwd or (request.client.host if request.client else 'x')}:{email}"
+    att = await db.login_attempts.find_one({"identifier": ident})
+    if att and att.get("count", 0) >= 5 and att.get("until", 0) > time.time():
+        raise HTTPException(429, "Çok fazla deneme. 15 dakika sonra tekrar deneyin")
+    u = await db.users.find_one({"email": email})
+    if not u or not verify_password(body.password, u["password_hash"]):
+        cnt = (att or {}).get("count", 0) + 1
+        await db.login_attempts.update_one({"identifier": ident}, {"$set": {"count": cnt, "until": time.time() + 900}}, upsert=True)
+        raise HTTPException(401, "E-posta veya şifre hatalı")
+    await db.login_attempts.delete_one({"identifier": ident})
+    return {"token": make_token(u["id"], email), "user": public_user(u)}
+
+
+@api.get("/auth/me")
+async def me(user: dict = Depends(current_user)):
+    return public_user(user)
+
+
+# ---------------- binance proxy ----------------
+_cache: Dict[str, Any] = {}
+
+
+async def bget(path: str, params: Optional[dict] = None, ttl: float = 2.0):
+    key = path + json.dumps(params or {}, sort_keys=True)
+    hit = _cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    r = await http.get(BINANCE + path, params=params)
+    if r.status_code != 200:
+        raise HTTPException(502, f"Binance hata: {r.text[:200]}")
+    data = r.json()
+    _cache[key] = (time.time() + ttl, data)
+    if len(_cache) > 2000:
+        for k in [k for k, v in _cache.items() if v[0] < time.time()]:
+            _cache.pop(k, None)
+    return data
+
+
+def _tick(sym: dict) -> str:
+    for f in sym.get("filters", []):
+        if f["filterType"] == "PRICE_FILTER":
+            return f["tickSize"]
+    return "0.01"
+
+
+@api.get("/market/symbols")
+async def market_symbols():
+    ex, finfo = await asyncio.gather(bget("/fapi/v1/exchangeInfo", ttl=600), bget("/fapi/v1/fundingInfo", ttl=600))
+    hours = {f["symbol"]: f.get("fundingIntervalHours", 8) for f in finfo}
+    out = []
+    for s in ex["symbols"]:
+        if s.get("contractType") not in ("PERPETUAL", "TRADIFI_PERPETUAL") or s.get("status") != "TRADING":
+            continue
+        out.append({"symbol": s["symbol"], "base": s["baseAsset"], "quote": s["quoteAsset"],
+                    "type": s.get("underlyingType", "COIN"), "tick": _tick(s),
+                    "fundingHours": hours.get(s["symbol"], 8)})
+    return out
+
+
+@api.get("/market/tickers")
+async def market_tickers():
+    t24, prem = await asyncio.gather(bget("/fapi/v1/ticker/24hr", ttl=2), bget("/fapi/v1/premiumIndex", ttl=2))
+    pm = {p["symbol"]: p for p in prem}
+    out = []
+    for t in t24:
+        p = pm.get(t["symbol"], {})
+        out.append({"s": t["symbol"], "c": t["lastPrice"], "P": t["priceChangePercent"], "q": t["quoteVolume"],
+                    "r": p.get("lastFundingRate"), "m": p.get("markPrice"), "T": p.get("nextFundingTime")})
+    return out
+
+
+@api.get("/market/klines")
+async def market_klines(symbol: str, interval: str, limit: int = Query(1000, ge=1, le=1500), endTime: Optional[int] = None):
+    params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
+    if endTime:
+        params["endTime"] = endTime
+    return await bget("/fapi/v1/klines", params, ttl=1.5)
+
+
+@api.get("/market/futures")
+async def market_futures(symbol: str, period: str = "5m"):
+    s = symbol.upper()
+    q = {"symbol": s, "period": period, "limit": 30}
+
+    async def safe(path, params, ttl):
+        try:
+            return await bget(path, params, ttl)
+        except Exception:
+            return None
+    prem, oi, oih, g, ta, tp = await asyncio.gather(
+        safe("/fapi/v1/premiumIndex", {"symbol": s}, 3),
+        safe("/fapi/v1/openInterest", {"symbol": s}, 10),
+        safe("/futures/data/openInterestHist", q, 30),
+        safe("/futures/data/globalLongShortAccountRatio", q, 30),
+        safe("/futures/data/topLongShortAccountRatio", q, 30),
+        safe("/futures/data/topLongShortPositionRatio", q, 30),
+    )
+    return {"premium": prem, "openInterest": oi, "oiHist": oih or [], "global": g or [], "topAccount": ta or [], "topPosition": tp or []}
+
+
+# ---------------- workspace & drawings ----------------
+@api.get("/workspace")
+async def get_workspace(user: dict = Depends(current_user)):
+    doc = await db.workspaces.find_one({"user_id": user["id"]}, {"_id": 0})
+    return {"settings": (doc or {}).get("settings", {}), "favorites": (doc or {}).get("favorites"), "ts": (doc or {}).get("ts", 0)}
+
+
+@api.put("/workspace")
+async def put_workspace(body: Dict[str, Any], user: dict = Depends(current_user)):
+    upd = {k: v for k, v in body.items() if k in ("settings", "favorites", "ts")}
+    upd["updated_at"] = now_iso()
+    await db.workspaces.update_one({"user_id": user["id"]}, {"$set": upd}, upsert=True)
+    return {"ok": True}
+
+
+class DrawingsIn(BaseModel):
+    drawings: List[Dict[str, Any]]
+
+
+@api.get("/drawings/{symbol}")
+async def get_drawings(symbol: str, user: dict = Depends(current_user)):
+    doc = await db.drawings.find_one({"user_id": user["id"], "symbol": symbol.upper()}, {"_id": 0})
+    return {"drawings": (doc or {}).get("drawings", [])}
+
+
+@api.put("/drawings/{symbol}")
+async def put_drawings(symbol: str, body: DrawingsIn, user: dict = Depends(current_user)):
+    await db.drawings.update_one({"user_id": user["id"], "symbol": symbol.upper()},
+                                 {"$set": {"drawings": body.drawings[:500], "updated_at": now_iso()}}, upsert=True)
+    return {"ok": True}
+
+
+# ---------------- alarms ----------------
+class AlarmIn(BaseModel):
+    symbol: str
+    price: float
+    current_price: Optional[float] = None
+    note: Optional[str] = None
+
+
+@api.get("/alarms")
+async def list_alarms(user: dict = Depends(current_user)):
+    return await db.alarms.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+@api.post("/alarms")
+async def create_alarm(body: AlarmIn, user: dict = Depends(current_user)):
+    sym = body.symbol.upper()
+    cur = LAST_PRICES.get(sym) or body.current_price
+    if cur is None:
+        raise HTTPException(400, "Güncel fiyat alınamadı")
+    a = {"id": str(uuid.uuid4()), "user_id": user["id"], "symbol": sym, "price": body.price,
+         "direction": "above" if body.price >= cur else "below", "created_price": cur, "note": body.note,
+         "active": True, "created_at": now_iso(), "triggered_at": None, "trigger_price": None}
+    await db.alarms.insert_one(a)
+    a.pop("_id", None)
+    return a
+
+
+@api.delete("/alarms/{alarm_id}")
+async def delete_alarm(alarm_id: str, user: dict = Depends(current_user)):
+    await db.alarms.delete_one({"id": alarm_id, "user_id": user["id"]})
+    return {"ok": True}
+
+
+@api.delete("/alarms")
+async def clear_triggered(user: dict = Depends(current_user)):
+    r = await db.alarms.delete_many({"user_id": user["id"], "active": False})
+    return {"deleted": r.deleted_count}
+
+
+# ---------------- push ----------------
+class SubIn(BaseModel):
+    endpoint: str
+    keys: Dict[str, str]
+
+
+@api.get("/push/public-key")
+async def push_key():
+    return {"publicKey": os.environ["VAPID_PUBLIC_KEY"]}
+
+
+@api.post("/push/subscribe")
+async def push_subscribe(body: SubIn, user: dict = Depends(current_user)):
+    if not body.endpoint.startswith("https://"):
+        raise HTTPException(400, "Geçersiz push adresi")
+    await db.push_subs.update_one({"endpoint": body.endpoint},
+                                  {"$set": {"user_id": user["id"], "endpoint": body.endpoint, "keys": body.keys, "updated_at": now_iso()}},
+                                  upsert=True)
+    return {"ok": True}
+
+
+def _send(sub: dict, payload: dict):
+    webpush(subscription_info={"endpoint": sub["endpoint"], "keys": sub["keys"]}, data=json.dumps(payload),
+            vapid_private_key=os.environ["VAPID_PRIVATE_KEY"], vapid_claims={"sub": os.environ["VAPID_SUBJECT"]},
+            ttl=86400, headers={"Urgency": "high"}, timeout=10)
+
+
+async def push_user(user_id: str, payload: dict) -> int:
+    subs = await db.push_subs.find({"user_id": user_id}, {"_id": 0}).to_list(50)
+    sent = 0
+    for s in subs:
+        try:
+            await asyncio.to_thread(_send, s, payload)
+            sent += 1
+            logger.info("push sent user=%s tag=%s", user_id[:8], payload.get("tag"))
+        except WebPushException as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (404, 410):
+                await db.push_subs.delete_one({"endpoint": s["endpoint"]})
+            logger.warning("push failed %s user=%s tag=%s", code, user_id[:8], payload.get("tag"))
+        except Exception as e:
+            logger.warning("push error %s", e)
+    return sent
+
+
+@api.post("/push/test")
+async def push_test(user: dict = Depends(current_user)):
+    n = await push_user(user["id"], {"title": "Epochveras", "body": "Test bildirimi çalışıyor", "tag": "test"})
+    return {"sent": n}
+
+
+def fmt_tr(v: float) -> str:
+    s = f"{v:,.8f}".rstrip("0").rstrip(".")
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+async def alarm_loop():
+    while True:
+        try:
+            data = await bget("/fapi/v1/ticker/price", ttl=1)
+            for d in data:
+                LAST_PRICES[d["symbol"]] = float(d["price"])
+            async for a in db.alarms.find({"active": True}, {"_id": 0}):
+                p = LAST_PRICES.get(a["symbol"])
+                if p is None:
+                    continue
+                hit = p >= a["price"] if a["direction"] == "above" else p <= a["price"]
+                if not hit:
+                    continue
+                res = await db.alarms.update_one({"id": a["id"], "active": True},
+                                                 {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": p}})
+                if res.modified_count:
+                    arrow = "yukarı kesti" if a["direction"] == "above" else "aşağı kesti"
+                    task = asyncio.create_task(push_user(a["user_id"], {
+                        "title": f"⏰ {a['symbol']} alarm", "body": f"{a['symbol']} {fmt_tr(a['price'])} seviyesini {arrow} · Fiyat {fmt_tr(p)}",
+                        "tag": a["id"], "url": f"/?symbol={a['symbol']}"}))
+                    PUSH_TASKS.add(task)
+                    task.add_done_callback(PUSH_TASKS.discard)
+        except Exception as e:
+            logger.warning("alarm loop: %s", e)
+        await asyncio.sleep(2)
+
+
+app.include_router(api)
+app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=os.environ['CORS_ORIGINS'].split(','),
+                   allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+async def startup():
+    global http
+    http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 Epochveras"})
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.alarms.create_index([("user_id", 1), ("created_at", -1)])
+    await db.alarms.create_index("active")
+    await db.drawings.create_index([("user_id", 1), ("symbol", 1)], unique=True)
+    await db.workspaces.create_index("user_id", unique=True)
+    await db.push_subs.create_index("endpoint", unique=True)
+    await db.push_subs.create_index("user_id")
+    await db.login_attempts.create_index("identifier")
+    admin_email = os.environ["ADMIN_EMAIL"].lower()
+    if not await db.users.find_one({"email": admin_email}):
+        await db.users.insert_one({"id": str(uuid.uuid4()), "email": admin_email, "name": "Admin",
+                                   "password_hash": hash_password(os.environ["ADMIN_PASSWORD"]), "role": "admin", "created_at": now_iso()})
+    app.state.alarm_task = asyncio.create_task(alarm_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    app.state.alarm_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await app.state.alarm_task
+    await http.aclose()
+    client.close()

@@ -1,0 +1,186 @@
+{
+  "project_name": "Epochveras Trading Terminal",
+  "archetype": "TradingView Dark Professional / Pure Black High Density Terminal",
+  "theme": "dark_pure_black",
+  "palette": {
+    "canvas_background": "#000000",
+    "surface_panel": "#0c0d0f",
+    "surface_panel_secondary": "#131722",
+    "surface_active": "#1e222d",
+    "surface_hover": "#171b26",
+    "border_color": "#2a2e39",
+    "border_subtle": "#1e222d",
+    "text_primary": "#d1d4dc",
+    "text_secondary": "#787b86",
+    "text_muted": "#50535e",
+    "bullish_up": "#089981",
+    "bullish_up_soft": "rgba(8, 153, 129, 0.16)",
+    "bearish_down": "#f23645",
+    "bearish_down_soft": "rgba(242, 54, 69, 0.16)",
+    "accent_brand": "#2962ff",
+    "accent_brand_hover": "#1e53e5",
+    "funding_highlight": "#f0b90b",
+    "alarm_tag": "#e0a020",
+    "alarm_tag_bg": "rgba(224, 160, 32, 0.15)",
+    "buyer_long": "#0ecb81",
+    "seller_short": "#f6465d"
+  },
+  "typography": {
+    "font_family_ui": "system-ui, -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif",
+    "font_family_numbers": "'JetBrains Mono', 'Roboto Mono', ui-monospace, SFMono-Regular, monospace",
+    "font_weights": {
+      "regular": "400",
+      "medium": "500",
+      "semibold": "600",
+      "bold": "700"
+    },
+    "scale": {
+      "xs": "10px",
+      "sm": "11px",
+      "base": "12px",
+      "md": "13px",
+      "lg": "14px",
+      "xl": "16px",
+      "hero_price": "24px"
+    },
+    "rules": "All numerical data, prices, timers, percentages and volumes must use font-mono with tabular numbers (font-variant-numeric: tabular-nums)."
+  },
+  "turkish_localization_rules": {
+    "locale": "tr-TR",
+    "number_formatting": "Thousands separator dot (.), decimal separator comma (,). E.g.: 73.258,01",
+    "volume_formatting": "Turkish short notation, e.g. 1.24B $ or 420,5M $",
+    "funding_interval_format": "%0,0100 (4s)",
+    "countdown_format": "mm:ss (e.g. 02:44 until candle close)"
+  },
+  "layout_architecture": {
+    "top_navbar": {
+      "height": "42px",
+      "bg": "#0c0d0f",
+      "border_bottom": "1px solid #2a2e39",
+      "elements": [
+        "Brand logo 'EPOCHVERAS' with glowing epoch glyph",
+        "Symbol search modal trigger (e.g. BTCUSDT Perpetual Binance)",
+        "Timeframe picker buttons: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1D, 1W",
+        "Candle style selector (Candles, Hollow, Heikin Ashi, Line)",
+        "Indicators dropdown (Epoch Script, RSI, EMA 20/50/200, MACD)",
+        "Quick Settings icon",
+        "Alarm creation trigger",
+        "PWA Install / Fullscreen action",
+        "User profile / Auth status badge"
+      ]
+    },
+    "left_drawing_toolbar": {
+      "width": "42px",
+      "bg": "#0c0d0f",
+      "border_right": "1px solid #2a2e39",
+      "touch_target_min": "36px",
+      "tools": [
+        "Cursor / Crosshair",
+        "Trendline (Çizgi)",
+        "Horizontal Ray (Yatay Işın)",
+        "Long / Short Position Template (Alış/Satış Pozisyonu)",
+        "Soft Magnet (Yumuşak Mıknatıs toggle)",
+        "Ruler / Price-Bars Range Measure (Cetvel)",
+        "Trash / Clear Drawings"
+      ]
+    },
+    "main_chart_area": {
+      "bg": "#000000",
+      "canvas_rule": "HTML5 Canvas or lightweight-charts with black background (#000000). Crosshair with dotted grey lines (#434651).",
+      "price_axis": {
+        "width": "68px",
+        "position": "right",
+        "price_tag": "Current price label in green/red box based on last tick",
+        "countdown_tag": "Small pill showing candle close countdown directly under active price",
+        "alarm_add_button": "Hovering or tapping on price scale reveals small '+' badge to quickly set price alarm"
+      },
+      "indicators_pane": {
+        "overlay": "Epoch Script signals (trend cloud / entry markers / support-resistance bands)",
+        "sub_pane": "RSI (14) pane at bottom of chart with 70/30 dashed levels and purple curve"
+      }
+    },
+    "right_side_panel": {
+      "default_width": "320px",
+      "min_width": "260px",
+      "max_width": "420px",
+      "collapsible": true,
+      "tabs": [
+        {
+          "id": "watchlist",
+          "label": "İzleme Listesi",
+          "sub_categories": ["Favoriler", "Kripto Vadeli", "Emtia / Makro"],
+          "columns": ["Sembol", "Son Fiyat (₺/$)", "24s Değişim %", "24s Hacim", "Fonlama (Kalan)"]
+        },
+        {
+          "id": "alarms",
+          "label": "Alarmlar",
+          "features": ["Aktif alarmlar listesi", "Tetiklenme geçmişi", "Sesli bildirim toggle", "Yeni alarm kur formu (Fiyat, Koşul, Not)"],
+          "visual_rule": "Chart only shows clean small tag pill at price coordinate; no disruptive horizontal line across the entire screen."
+        },
+        {
+          "id": "futures_data",
+          "label": "Vadeli Veriler",
+          "features": [
+            "Fonlama Oranı (Funding Rate) ve sonraki ödeme sayacı (örn: 04:12:00)",
+            "Long/Short Hesap Oranı (Hesap bazlı Alıcı/Satıcı yüzdesi)",
+            "Top Trader Pozisyon Oranı (Balina / En İyi Yatırımcı Pozisyon Dağılımı)",
+            "Görselleştirme: Binance tarzı yeşil/kırmızı Alıcı-Satıcı çubukları (Buyer/Seller Bar, örn: %58.4 Long / %41.6 Short)",
+            "Açık Pozisyon (Open Interest) ve 24s Hacim Trendi"
+          ]
+        }
+      ]
+    },
+    "bottom_status_bar": {
+      "height": "24px",
+      "bg": "#0c0d0f",
+      "border_top": "1px solid #1e222d",
+      "elements": ["Bağlantı: WebSocket Aktif (Yeşil Dot)", "Binance Futures API", "Saat Dilimi: UTC+3 (İstanbul)", "PWA Durumu"]
+    }
+  },
+  "touch_and_pwa_guidelines": {
+    "mobile_touch_targets": "Minimum 40px touch targets for toolbar buttons on mobile/tablet",
+    "tablet_split_view": "Collapsible sidebar that can slide over on mobile or dock as resizable pane on tablet/desktop",
+    "pwa_manifest": "Theme color #000000, background_color #000000, display: standalone",
+    "pinch_zoom_behavior": "Chart handles two-finger pinch zoom and single finger pan seamlessly"
+  },
+  "auth_and_modals": {
+    "login_page": {
+      "bg": "#000000",
+      "card_bg": "#0c0d0f",
+      "border": "#2a2e39",
+      "inputs": "Email and password inputs with Turkish labels (E-posta, Şifre, Giriş Yap, Kayıt Ol)",
+      "branding": "Epochveras Terminal logo with animated glowing pulse"
+    },
+    "loading_state": {
+      "logo_display": "Prominent Epochveras geometric monogram with pulsing radial glow in pure black backdrop"
+    },
+    "indicator_settings_dialog": {
+      "overlay_bg": "rgba(0, 0, 0, 0.75)",
+      "container_bg": "#131722",
+      "border": "#2a2e39"
+    }
+  },
+  "test_id_rules": {
+    "topbar_symbol_search": "topbar-symbol-search-button",
+    "timeframe_button_prefix": "timeframe-button-",
+    "indicator_menu_button": "indicator-menu-button",
+    "drawing_tool_prefix": "drawing-tool-",
+    "chart_canvas": "tradingview-chart-canvas",
+    "watchlist_tab": "watchlist-tab-button",
+    "alarms_tab": "alarms-tab-button",
+    "futures_data_tab": "futures-data-tab-button",
+    "price_scale_add_alarm": "price-scale-add-alarm-button",
+    "login_submit_button": "auth-login-submit-button",
+    "register_submit_button": "auth-register-submit-button"
+  },
+  "instructions_to_main_agent": [
+    "Strictly adhere to Pure Black (#000000) for the main chart canvas and terminal backdrops as requested by the user.",
+    "Do not use generic gray backgrounds for the chart. The canvas must feel like TradingView pro terminal.",
+    "Ensure numbers are formatted in Turkish notation (e.g. 73.258,01 with dot for thousands and comma for decimal).",
+    "For the alarms, show only a compact marker badge/tag near the right price axis without spanning distracting lines across candles.",
+    "In the Futures Data panel, implement the dual-color ratio progress bar (green buyer / red seller) mimicking Binance Futures Long/Short ratios.",
+    "Implement the drawing tools logic (Trendline, Horizontal Ray, Long/Short Position Template, Soft Magnet toggle, Ruler) with active state styling.",
+    "Add responsive touch event support for tablet/mobile and ensure PWA manifest is present.",
+    "All interactive and informational UI components MUST carry data-testid attributes according to the defined conventions."
+  ]
+}

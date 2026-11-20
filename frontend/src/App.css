@@ -1,0 +1,16 @@
+.ev-pulse { animation: evPulse 1.8s ease-in-out infinite; }
+@keyframes evPulse { 0%, 100% { opacity: .75; transform: scale(.97); } 50% { opacity: 1; transform: scale(1.03); } }
+.ev-dot { width: 5px; height: 5px; border-radius: 9999px; background: #d1d4dc; animation: evDot 1s ease-in-out infinite; }
+@keyframes evDot { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+.ev-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.ev-scroll::-webkit-scrollbar-thumb { background: #2a2e39; border-radius: 6px; }
+.ev-scroll::-webkit-scrollbar-track { background: transparent; }
+.ev-noscroll::-webkit-scrollbar { display: none; }
+.ev-noscroll { scrollbar-width: none; }
+.num { font-family: Roboto, -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Ubuntu, sans-serif; font-variant-numeric: tabular-nums; }
+.ev-handle { position: relative; background: #1e222d; transition: background-color .15s; }
+.ev-handle:hover, .ev-handle[data-resize-handle-state="drag"] { background: #787b86; }
+.ev-notice { animation: evIn .35s cubic-bezier(.2,.8,.2,1); }
+@keyframes evIn { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+.ev-notice-bar { animation: evBar 20s linear forwards; transform-origin: left; }
+@keyframes evBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
