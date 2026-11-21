@@ -12,24 +12,56 @@ import Terminal from "@/pages/Terminal";
 function BackendGate({ children }) {
   const [ok, setOk] = useState(false);
   const [tries, setTries] = useState(0);
+  const [lastErr, setLastErr] = useState("");
+
   useEffect(() => {
     let alive = true;
-    const ping = () => api.get("/health", { timeout: 8000 }).then(() => alive && setOk(true)).catch(() => { if (alive) { setTries((t) => t + 1); setTimeout(ping, 2500); } });
+    const ping = () =>
+      api
+        .get("/health", { timeout: 12000 })
+        .then(() => {
+          if (alive) setOk(true);
+        })
+        .catch((err) => {
+          if (alive) {
+            const code = err?.response?.status ? `HTTP ${err.response.status}` : "";
+            const msg = err?.message || "Network Error";
+            setLastErr(code ? `${code} (${msg})` : msg);
+            setTries((t) => t + 1);
+            setTimeout(ping, 2500);
+          }
+        });
+
     ping();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
-  if (!ok) return <Splash text={tries > 1 ? "Sunucu uyanıyor, veriler yükleniyor…" : "Veriler yükleniyor…"} />;
+
+  if (!ok) {
+    return (
+      <Splash
+        text={
+          tries > 1
+            ? `Sunucu uyanıyor, veriler yükleniyor…${lastErr ? ` [${lastErr}]` : ""}`
+            : "Veriler yükleniyor…"
+        }
+      />
+    );
+  }
+
   return children;
 }
 
 function Guard({ children }) {
   const { user } = useAuth();
-  if (user === null) return <Splash />;
+  if (user === null) return <Splash text="Oturum kontrol ediliyor…" />;
   return user ? children : <Navigate to="/login" replace />;
 }
+
 function PublicOnly({ children }) {
   const { user } = useAuth();
-  if (user === null) return <Splash />;
+  if (user === null) return <Splash text="Oturum kontrol ediliyor…" />;
   return user ? <Navigate to="/" replace /> : children;
 }
 
