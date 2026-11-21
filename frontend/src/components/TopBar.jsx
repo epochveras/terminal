@@ -10,7 +10,7 @@ export function TopBar({ symbol, tf, setTf, onSearch, settings, toggleInd, openI
   return (
     <div className="h-11 shrink-0 bg-[#0c0d0f] border-b border-[#2a2e39] flex items-center gap-1 px-2 overflow-x-auto ev-noscroll" data-testid="top-bar">
       <div className="flex items-center gap-2 pr-2 shrink-0">
-        <img src="/icon-192.png" alt="" className="w-7 h-7 rounded-md" />
+        <img src="/icon-5122.png" alt="Epochveras" className="w-7 h-7 rounded-md object-contain" />
         <span className="hidden lg:block font-semibold text-[15px] text-white">Epochveras</span>
       </div>
       <div className="w-px h-6 bg-[#2a2e39] shrink-0" />
