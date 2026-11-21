@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import bcrypt
 import httpx
 import jwt
+import websockets
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ logger = logging.getLogger("epochveras")
 client = AsyncIOMotorClient(os.environ['MONGO_URL'])
 db = client[os.environ['DB_NAME']]
 BINANCE = os.environ['BINANCE_BASE']
+BINANCE_WS = os.environ.get("BINANCE_WS", "wss://fstream.binance.com/ws/!ticker@arr")
 JWT_SECRET = os.environ['JWT_SECRET']
 
 app = FastAPI()
@@ -36,6 +38,9 @@ api = APIRouter(prefix="/api")
 http: Optional[httpx.AsyncClient] = None
 LAST_PRICES: Dict[str, float] = {}
 PUSH_TASKS: set = set()
+WS_CONNECTED: bool = False
+BAN_UNTIL: float = 0.0
+_ALARM_CHECK_LOCK = asyncio.Lock()
 
 
 def now_iso() -> str:
@@ -44,7 +49,12 @@ def now_iso() -> str:
 
 @api.get("/health")
 async def health():
-    return {"ok": True, "prices": len(LAST_PRICES)}
+    return {
+        "ok": True,
+        "prices": len(LAST_PRICES),
+        "ws_connected": WS_CONNECTED,
+        "ban_remaining_sec": max(0, int(BAN_UNTIL - time.time())),
+    }
 
 
 # ---------------- auth ----------------
@@ -127,14 +137,41 @@ async def me(user: dict = Depends(current_user)):
 _cache: Dict[str, Any] = {}
 
 
-async def bget(path: str, params: Optional[dict] = None, ttl: float = 2.0):
+def _record_ban_if_present(text: str):
+    global BAN_UNTIL
+    # Örnek: "banned until 1795323779634"
+    marker = "banned until "
+    idx = text.find(marker)
+    if idx != -1:
+        num_str = "".join(ch for ch in text[idx + len(marker):idx + len(marker) + 20] if ch.isdigit())
+        if num_str:
+            until_sec = int(num_str) / 1000.0
+            BAN_UNTIL = max(BAN_UNTIL, until_sec + 5.0)
+            return
+    BAN_UNTIL = max(BAN_UNTIL, time.time() + 90.0)
+
+
+async def bget(path: str, params: Optional[dict] = None, ttl: float = 5.0):
+    global BAN_UNTIL
     key = path + json.dumps(params or {}, sort_keys=True)
     hit = _cache.get(key)
     if hit and hit[0] > time.time():
         return hit[1]
+
+    if time.time() < BAN_UNTIL:
+        if hit:
+            return hit[1]
+        raise HTTPException(503, f"Binance IP kısıtı aktif ({int(BAN_UNTIL - time.time())} sn kaldı)")
+
     r = await http.get(BINANCE + path, params=params)
+    if r.status_code in (418, 429) or "-1003" in r.text:
+        _record_ban_if_present(r.text)
+        if hit:
+            return hit[1]
+        raise HTTPException(502, f"Binance hata: {r.text[:200]}")
     if r.status_code != 200:
         raise HTTPException(502, f"Binance hata: {r.text[:200]}")
+
     data = r.json()
     _cache[key] = (time.time() + ttl, data)
     if len(_cache) > 2000:
@@ -166,7 +203,25 @@ async def market_symbols():
 
 @api.get("/market/tickers")
 async def market_tickers():
-    t24, prem = await asyncio.gather(bget("/fapi/v1/ticker/24hr", ttl=2), bget("/fapi/v1/premiumIndex", ttl=2))
+    # WebSocket fiyatları varsa önce buradan besle, yoksa cache/REST'e düş
+    if LAST_PRICES:
+        with suppress(Exception):
+            prem = await bget("/fapi/v1/premiumIndex", ttl=15)
+            pm = {p["symbol"]: p for p in prem}
+            return [
+                {
+                    "s": sym,
+                    "c": str(price),
+                    "P": pm.get(sym, {}).get("priceChangePercent", "0"),
+                    "q": pm.get(sym, {}).get("quoteVolume", "0"),
+                    "r": pm.get(sym, {}).get("lastFundingRate"),
+                    "m": pm.get(sym, {}).get("markPrice"),
+                    "T": pm.get(sym, {}).get("nextFundingTime"),
+                }
+                for sym, price in LAST_PRICES.items()
+            ]
+
+    t24, prem = await asyncio.gather(bget("/fapi/v1/ticker/24hr", ttl=10), bget("/fapi/v1/premiumIndex", ttl=10))
     pm = {p["symbol"]: p for p in prem}
     out = []
     for t in t24:
@@ -181,7 +236,7 @@ async def market_klines(symbol: str, interval: str, limit: int = Query(1000, ge=
     params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
     if endTime:
         params["endTime"] = endTime
-    return await bget("/fapi/v1/klines", params, ttl=1.5)
+    return await bget("/fapi/v1/klines", params, ttl=5.0)
 
 
 @api.get("/market/futures")
@@ -195,12 +250,12 @@ async def market_futures(symbol: str, period: str = "5m"):
         except Exception:
             return None
     prem, oi, oih, g, ta, tp = await asyncio.gather(
-        safe("/fapi/v1/premiumIndex", {"symbol": s}, 3),
-        safe("/fapi/v1/openInterest", {"symbol": s}, 10),
-        safe("/futures/data/openInterestHist", q, 30),
-        safe("/futures/data/globalLongShortAccountRatio", q, 30),
-        safe("/futures/data/topLongShortAccountRatio", q, 30),
-        safe("/futures/data/topLongShortPositionRatio", q, 30),
+        safe("/fapi/v1/premiumIndex", {"symbol": s}, 10),
+        safe("/fapi/v1/openInterest", {"symbol": s}, 20),
+        safe("/futures/data/openInterestHist", q, 60),
+        safe("/futures/data/globalLongShortAccountRatio", q, 60),
+        safe("/futures/data/topLongShortAccountRatio", q, 60),
+        safe("/futures/data/topLongShortPositionRatio", q, 60),
     )
     return {"premium": prem, "openInterest": oi, "oiHist": oih or [], "global": g or [], "topAccount": ta or [], "topPosition": tp or []}
 
@@ -332,28 +387,86 @@ def fmt_tr(v: float) -> str:
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+async def evaluate_alarms():
+    if not LAST_PRICES:
+        return
+    async with _ALARM_CHECK_LOCK:
+        async for a in db.alarms.find({"active": True}, {"_id": 0}):
+            p = LAST_PRICES.get(a["symbol"])
+            if p is None:
+                continue
+            hit = p >= a["price"] if a["direction"] == "above" else p <= a["price"]
+            if not hit:
+                continue
+            res = await db.alarms.update_one(
+                {"id": a["id"], "active": True},
+                {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": p}},
+            )
+            if res.modified_count:
+                arrow = "yukarı kesti" if a["direction"] == "above" else "aşağı kesti"
+                task = asyncio.create_task(push_user(a["user_id"], {
+                    "title": f"⏰ {a['symbol']} alarm",
+                    "body": f"{a['symbol']} {fmt_tr(a['price'])} seviyesini {arrow} · Fiyat {fmt_tr(p)}",
+                    "tag": a["id"],
+                    "url": f"/?symbol={a['symbol']}",
+                }))
+                PUSH_TASKS.add(task)
+                task.add_done_callback(PUSH_TASKS.discard)
+
+
+async def rest_fallback_tick():
+    # WS bağlı değilse ve ban süresi dolmuşsa seyrek REST yedeği çalışır
+    if WS_CONNECTED or time.time() < BAN_UNTIL:
+        return
+    try:
+        data = await bget("/fapi/v1/ticker/price", ttl=15)
+        for d in data:
+            LAST_PRICES[d["symbol"]] = float(d["price"])
+    except Exception as e:
+        logger.warning("rest fallback: %s", e)
+
+
+async def price_ws_loop():
+    global WS_CONNECTED
+    backoff = 2.0
+    while True:
+        try:
+            async with websockets.connect(
+                BINANCE_WS,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=10 * 1024 * 1024,
+            ) as ws:
+                WS_CONNECTED = True
+                backoff = 2.0
+                logger.info("binance ws connected: %s", BINANCE_WS)
+                async for raw in ws:
+                    items = json.loads(raw)
+                    if isinstance(items, list):
+                        for item in items:
+                            sym = item.get("s")
+                            price = item.get("c")
+                            if sym and price is not None:
+                                LAST_PRICES[sym] = float(price)
+        except asyncio.CancelledError:
+            WS_CONNECTED = False
+            raise
+        except Exception as e:
+            WS_CONNECTED = False
+            logger.warning("binance ws disconnected (%s), retrying in %.1fs", e, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.5, 30.0)
+
+
 async def alarm_loop():
     while True:
         try:
-            data = await bget("/fapi/v1/ticker/price", ttl=1)
-            for d in data:
-                LAST_PRICES[d["symbol"]] = float(d["price"])
-            async for a in db.alarms.find({"active": True}, {"_id": 0}):
-                p = LAST_PRICES.get(a["symbol"])
-                if p is None:
-                    continue
-                hit = p >= a["price"] if a["direction"] == "above" else p <= a["price"]
-                if not hit:
-                    continue
-                res = await db.alarms.update_one({"id": a["id"], "active": True},
-                                                 {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": p}})
-                if res.modified_count:
-                    arrow = "yukarı kesti" if a["direction"] == "above" else "aşağı kesti"
-                    task = asyncio.create_task(push_user(a["user_id"], {
-                        "title": f"⏰ {a['symbol']} alarm", "body": f"{a['symbol']} {fmt_tr(a['price'])} seviyesini {arrow} · Fiyat {fmt_tr(p)}",
-                        "tag": a["id"], "url": f"/?symbol={a['symbol']}"}))
-                    PUSH_TASKS.add(task)
-                    task.add_done_callback(PUSH_TASKS.discard)
+            if not LAST_PRICES:
+                await rest_fallback_tick()
+            await evaluate_alarms()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("alarm loop: %s", e)
         await asyncio.sleep(2)
@@ -381,13 +494,17 @@ async def startup():
     if not await db.users.find_one({"email": admin_email}):
         await db.users.insert_one({"id": str(uuid.uuid4()), "email": admin_email, "name": "Admin",
                                    "password_hash": hash_password(os.environ["ADMIN_PASSWORD"]), "role": "admin", "created_at": now_iso()})
+    app.state.ws_task = asyncio.create_task(price_ws_loop())
     app.state.alarm_task = asyncio.create_task(alarm_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    app.state.alarm_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await app.state.alarm_task
+    for task_name in ("ws_task", "alarm_task"):
+        task = getattr(app.state, task_name, None)
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
     await http.aclose()
     client.close()
