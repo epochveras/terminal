@@ -39,7 +39,6 @@ http: Optional[httpx.AsyncClient] = None
 LAST_PRICES: Dict[str, float] = {}
 PUSH_TASKS: set = set()
 WS_CONNECTED: bool = False
-BAN_UNTIL: float = 0.0
 _ALARM_CHECK_LOCK = asyncio.Lock()
 
 
@@ -53,7 +52,6 @@ async def health():
         "ok": True,
         "prices": len(LAST_PRICES),
         "ws_connected": WS_CONNECTED,
-        "ban_remaining_sec": max(0, int(BAN_UNTIL - time.time())),
     }
 
 
@@ -137,39 +135,16 @@ async def me(user: dict = Depends(current_user)):
 _cache: Dict[str, Any] = {}
 
 
-def _record_ban_if_present(text: str):
-    global BAN_UNTIL
-    # Örnek: "banned until 1795323779634"
-    marker = "banned until "
-    idx = text.find(marker)
-    if idx != -1:
-        num_str = "".join(ch for ch in text[idx + len(marker):idx + len(marker) + 20] if ch.isdigit())
-        if num_str:
-            until_sec = int(num_str) / 1000.0
-            BAN_UNTIL = max(BAN_UNTIL, until_sec + 5.0)
-            return
-    BAN_UNTIL = max(BAN_UNTIL, time.time() + 90.0)
-
-
 async def bget(path: str, params: Optional[dict] = None, ttl: float = 5.0):
-    global BAN_UNTIL
     key = path + json.dumps(params or {}, sort_keys=True)
     hit = _cache.get(key)
     if hit and hit[0] > time.time():
         return hit[1]
 
-    if time.time() < BAN_UNTIL:
-        if hit:
-            return hit[1]
-        raise HTTPException(503, f"Binance IP kısıtı aktif ({int(BAN_UNTIL - time.time())} sn kaldı)")
-
     r = await http.get(BINANCE + path, params=params)
-    if r.status_code in (418, 429) or "-1003" in r.text:
-        _record_ban_if_present(r.text)
+    if r.status_code != 200:
         if hit:
             return hit[1]
-        raise HTTPException(502, f"Binance hata: {r.text[:200]}")
-    if r.status_code != 200:
         raise HTTPException(502, f"Binance hata: {r.text[:200]}")
 
     data = r.json()
@@ -203,7 +178,6 @@ async def market_symbols():
 
 @api.get("/market/tickers")
 async def market_tickers():
-    # WebSocket fiyatları varsa önce buradan besle, yoksa cache/REST'e düş
     if LAST_PRICES:
         with suppress(Exception):
             prem = await bget("/fapi/v1/premiumIndex", ttl=15)
@@ -415,8 +389,7 @@ async def evaluate_alarms():
 
 
 async def rest_fallback_tick():
-    # WS bağlı değilse ve ban süresi dolmuşsa seyrek REST yedeği çalışır
-    if WS_CONNECTED or time.time() < BAN_UNTIL:
+    if WS_CONNECTED:
         return
     try:
         data = await bget("/fapi/v1/ticker/price", ttl=15)
