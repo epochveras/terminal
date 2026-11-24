@@ -69,12 +69,12 @@ async def current_user(request: Request) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Oturum süresi doldu")
+        raise HTTPException(401, "Oturum sÃ¼resi doldu")
     except jwt.InvalidTokenError:
-        raise HTTPException(401, "Geçersiz oturum")
+        raise HTTPException(401, "GeÃ§ersiz oturum")
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
     if not user:
-        raise HTTPException(401, "Kullanıcı bulunamadı")
+        raise HTTPException(401, "KullanÄ±cÄ± bulunamadÄ±")
     return user
 
 
@@ -92,9 +92,9 @@ def public_user(u: dict) -> dict:
 async def register(body: AuthIn):
     email = body.email.strip().lower()
     if "@" not in email:
-        raise HTTPException(400, "Geçerli bir e-posta girin")
+        raise HTTPException(400, "GeÃ§erli bir e-posta girin")
     if await db.users.find_one({"email": email}):
-        raise HTTPException(400, "Bu e-posta zaten kayıtlı")
+        raise HTTPException(400, "Bu e-posta zaten kayÄ±tlÄ±")
     u = {"id": str(uuid.uuid4()), "email": email, "name": body.name or email.split("@")[0],
          "password_hash": hash_password(body.password), "role": "user", "created_at": now_iso()}
     await db.users.insert_one(u)
@@ -108,12 +108,12 @@ async def login(body: AuthIn, request: Request):
     ident = f"{fwd or (request.client.host if request.client else 'x')}:{email}"
     att = await db.login_attempts.find_one({"identifier": ident})
     if att and att.get("count", 0) >= 5 and att.get("until", 0) > time.time():
-        raise HTTPException(429, "Çok fazla deneme. 15 dakika sonra tekrar deneyin")
+        raise HTTPException(429, "Ãok fazla deneme. 15 dakika sonra tekrar deneyin")
     u = await db.users.find_one({"email": email})
     if not u or not verify_password(body.password, u["password_hash"]):
         cnt = (att or {}).get("count", 0) + 1
         await db.login_attempts.update_one({"identifier": ident}, {"$set": {"count": cnt, "until": time.time() + 900}}, upsert=True)
-        raise HTTPException(401, "E-posta veya şifre hatalı")
+        raise HTTPException(401, "E-posta veya Åifre hatalÄ±")
     await db.login_attempts.delete_one({"identifier": ident})
     return {"token": make_token(u["id"], email), "user": public_user(u)}
 
@@ -125,22 +125,69 @@ async def me(user: dict = Depends(current_user)):
 
 # ---------------- binance proxy ----------------
 _cache: Dict[str, Any] = {}
+_cache_locks: Dict[str, asyncio.Lock] = {}
+BINANCE_COOLDOWN_UNTIL = 0.0
 
 
 async def bget(path: str, params: Optional[dict] = None, ttl: float = 2.0):
+    """REST proxy with request coalescing and shared Binance 418/429 cooldown."""
+    global BINANCE_COOLDOWN_UNTIL
     key = path + json.dumps(params or {}, sort_keys=True)
+    now = time.time()
     hit = _cache.get(key)
-    if hit and hit[0] > time.time():
+    if hit and hit[0] > now:
         return hit[1]
-    r = await http.get(BINANCE + path, params=params)
-    if r.status_code != 200:
-        raise HTTPException(502, f"Binance hata: {r.text[:200]}")
-    data = r.json()
-    _cache[key] = (time.time() + ttl, data)
-    if len(_cache) > 2000:
-        for k in [k for k, v in _cache.items() if v[0] < time.time()]:
-            _cache.pop(k, None)
-    return data
+    if now < BINANCE_COOLDOWN_UNTIL:
+        wait = int(BINANCE_COOLDOWN_UNTIL - now)
+        raise HTTPException(503, f"Binance korumasÄ± aktif. {wait} saniye bekleyin.")
+
+    lock = _cache_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        now = time.time()
+        hit = _cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+        if now < BINANCE_COOLDOWN_UNTIL:
+            wait = int(BINANCE_COOLDOWN_UNTIL - now)
+            raise HTTPException(503, f"Binance korumasÄ± aktif. {wait} saniye bekleyin.")
+        try:
+            response = await http.get(BINANCE + path, params=params)
+        except httpx.HTTPError as exc:
+            logger.warning("Binance baÄlantÄ± hatasÄ±: %s", exc)
+            raise HTTPException(503, "Binance baÄlantÄ±sÄ±nda geÃ§ici hata") from exc
+
+        if response.status_code in (418, 429):
+            delay = 60
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = max(delay, int(float(retry_after)))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                message = str(response.json().get("msg", ""))
+                import re
+                match = re.search(r"banned until\s+(\d+)", message, re.I)
+                if match:
+                    delay = max(delay, int(int(match.group(1)) / 1000 - time.time()) + 5)
+            except Exception:
+                pass
+            BINANCE_COOLDOWN_UNTIL = max(BINANCE_COOLDOWN_UNTIL, time.time() + delay)
+            logger.error("Binance HTTP %s; tÃ¼m REST istekleri %s saniye durduruldu", response.status_code, delay)
+            raise HTTPException(503, f"Binance hÄ±z sÄ±nÄ±rÄ± ({response.status_code}); {delay} saniye bekleniyor.")
+
+        if response.status_code != 200:
+            logger.warning("Binance HTTP %s: %s", response.status_code, response.text[:200])
+            raise HTTPException(502, f"Binance hata: {response.text[:200]}")
+
+        data = response.json()
+        _cache[key] = (time.time() + ttl, data)
+        if len(_cache) > 2000:
+            now = time.time()
+            for cache_key in [k for k, value in _cache.items() if value[0] < now]:
+                _cache.pop(cache_key, None)
+                _cache_locks.pop(cache_key, None)
+        return data
 
 
 def _tick(sym: dict) -> str:
@@ -255,7 +302,7 @@ async def create_alarm(body: AlarmIn, user: dict = Depends(current_user)):
     sym = body.symbol.upper()
     cur = LAST_PRICES.get(sym) or body.current_price
     if cur is None:
-        raise HTTPException(400, "Güncel fiyat alınamadı")
+        raise HTTPException(400, "GÃ¼ncel fiyat alÄ±namadÄ±")
     a = {"id": str(uuid.uuid4()), "user_id": user["id"], "symbol": sym, "price": body.price,
          "direction": "above" if body.price >= cur else "below", "created_price": cur, "note": body.note,
          "active": True, "created_at": now_iso(), "triggered_at": None, "trigger_price": None}
@@ -290,7 +337,7 @@ async def push_key():
 @api.post("/push/subscribe")
 async def push_subscribe(body: SubIn, user: dict = Depends(current_user)):
     if not body.endpoint.startswith("https://"):
-        raise HTTPException(400, "Geçersiz push adresi")
+        raise HTTPException(400, "GeÃ§ersiz push adresi")
     await db.push_subs.update_one({"endpoint": body.endpoint},
                                   {"$set": {"user_id": user["id"], "endpoint": body.endpoint, "keys": body.keys, "updated_at": now_iso()}},
                                   upsert=True)
@@ -323,7 +370,7 @@ async def push_user(user_id: str, payload: dict) -> int:
 
 @api.post("/push/test")
 async def push_test(user: dict = Depends(current_user)):
-    n = await push_user(user["id"], {"title": "Epochveras", "body": "Test bildirimi çalışıyor", "tag": "test"})
+    n = await push_user(user["id"], {"title": "Epochveras", "body": "Test bildirimi Ã§alÄ±ÅÄ±yor", "tag": "test"})
     return {"sent": n}
 
 
@@ -333,30 +380,43 @@ def fmt_tr(v: float) -> str:
 
 
 async def alarm_loop():
+    """Server-side alarm checks; independent of browser/app state."""
+    poll_seconds = 5
     while True:
         try:
-            data = await bget("/fapi/v1/ticker/price", ttl=1)
-            for d in data:
-                LAST_PRICES[d["symbol"]] = float(d["price"])
-            async for a in db.alarms.find({"active": True}, {"_id": 0}):
-                p = LAST_PRICES.get(a["symbol"])
-                if p is None:
+            # One all-symbol request, cached for four seconds; no browser polling needed.
+            data = await bget("/fapi/v1/ticker/price", ttl=4.0)
+            for item in data:
+                LAST_PRICES[item["symbol"]] = float(item["price"])
+
+            async for alarm in db.alarms.find({"active": True}, {"_id": 0}):
+                price = LAST_PRICES.get(alarm["symbol"])
+                if price is None:
                     continue
-                hit = p >= a["price"] if a["direction"] == "above" else p <= a["price"]
-                if not hit:
+                triggered = price >= alarm["price"] if alarm["direction"] == "above" else price <= alarm["price"]
+                if not triggered:
                     continue
-                res = await db.alarms.update_one({"id": a["id"], "active": True},
-                                                 {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": p}})
-                if res.modified_count:
-                    arrow = "yukarı kesti" if a["direction"] == "above" else "aşağı kesti"
-                    task = asyncio.create_task(push_user(a["user_id"], {
-                        "title": f"⏰ {a['symbol']} alarm", "body": f"{a['symbol']} {fmt_tr(a['price'])} seviyesini {arrow} · Fiyat {fmt_tr(p)}",
-                        "tag": a["id"], "url": f"/?symbol={a['symbol']}"}))
+                result = await db.alarms.update_one(
+                    {"id": alarm["id"], "active": True},
+                    {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": price}}
+                )
+                if result.modified_count:
+                    arrow = "yukarÄ± kesti" if alarm["direction"] == "above" else "aÅaÄÄ± kesti"
+                    task = asyncio.create_task(push_user(alarm["user_id"], {
+                        "title": f"â° {alarm['symbol']} alarm",
+                        "body": f"{alarm['symbol']} {fmt_tr(alarm['price'])} seviyesini {arrow} Â· Fiyat {fmt_tr(price)}",
+                        "tag": alarm["id"], "url": f"/?symbol={alarm['symbol']}"
+                    }))
                     PUSH_TASKS.add(task)
                     task.add_done_callback(PUSH_TASKS.discard)
-        except Exception as e:
-            logger.warning("alarm loop: %s", e)
-        await asyncio.sleep(2)
+        except HTTPException as exc:
+            # bget() has already activated a shared cooldown for 418/429.
+            logger.warning("alarm loop durakladÄ±: %s", exc.detail)
+        except Exception:
+            logger.exception("alarm loop beklenmeyen hata")
+
+        cooldown = max(0.0, BINANCE_COOLDOWN_UNTIL - time.time())
+        await asyncio.sleep(max(poll_seconds, min(cooldown, 300.0)))
 
 
 app.include_router(api)
