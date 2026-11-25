@@ -1,3 +1,4 @@
+
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Star, Search, Plus, X, ListPlus, Check, GripVertical, FolderPlus } from "lucide-react";
 import { market } from "@/lib/market";
@@ -91,6 +92,7 @@ export function Watchlist({ symbols, current, onSelect, favorites, updateFavs, p
   const secs = useMemo(() => sd.list || [], [sd]);
   const setSd = (patch) => setPrefs({ ...prefs, sections: { ...(prefs?.sections || {}), [tab]: { ...sd, ...patch } } });
   const manual = !sort.k && !q;
+
   const list = useMemo(() => {
     let l;
     if (tab === "crypto") l = symbols.filter((s) => ["COIN", "INDEX", "PREMARKET"].includes(s.type));
@@ -104,7 +106,13 @@ export function Watchlist({ symbols, current, onSelect, favorites, updateFavs, p
     const val = (s) => { const t = tickers[s.symbol] || {}; return sort.k === "s" ? s.symbol : sort.k === "r" ? +(t.r ?? 0) : t[sort.k] ?? -Infinity; };
     return [...l].sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * sort.d; });
   }, [symbols, tab, favorites, q, tickers, sort, sd.order]);
-  const items = useMemo(() => manual ? buildItems(list, secs, !!sd.otherCollapsed) : list.map((m) => ({ k: "r", m })), [manual, list, secs, sd.otherCollapsed]);
+
+  // Bölüm başlıklarını koru; sıralı liste her bölümün kendi içinde gösterilir.
+  const items = useMemo(
+    () => buildItems(list, secs, !!sd.otherCollapsed),
+    [list, secs, sd.otherCollapsed]
+  );
+
   const [secName, setSecName] = useState(null);
   const addSection = () => {
     const n = (secName || "").trim(); setSecName(null); if (!n) return;
@@ -173,12 +181,6 @@ export function Watchlist({ symbols, current, onSelect, favorites, updateFavs, p
             onKeyDown={(e) => { if (e.key === "Enter") addSection(); if (e.key === "Escape") setSecName(null); }} placeholder="Bölüm adı" className="w-28 h-8 bg-[#131722] text-[12px] px-2 rounded outline-none" />
         ) : <button data-testid="watchlist-add-section-button" title="Bölüm ekle" onClick={() => setSecName("")} className="h-8 w-8 flex items-center justify-center rounded text-[#787b86] hover:text-white hover:bg-[#131722]"><FolderPlus size={15} /></button>}
       </div>
-      {secs.length > 0 && sort.k && (
-        <div className="px-3 pb-1 text-[11px] text-[#787b86] flex items-center gap-2 shrink-0" data-testid="watchlist-sort-hint">
-          Sıralama açık, bölümler gizli
-          <button data-testid="watchlist-clear-sort" onClick={() => setPrefs({ ...prefs, sort: { k: null } })} className="text-[#d1d4dc] underline underline-offset-2">Bölümleri göster</button>
-        </div>
-      )}
       <div className="flex-1 min-h-0 overflow-auto ev-scroll" ref={box} onScroll={(e) => setScroll(e.currentTarget.scrollTop)}>
         <div className="min-w-[440px]">
           <div className="grid items-center h-7 px-1 sticky top-0 bg-[#0c0d0f] z-[1] border-b border-[#1e222d]" style={{ gridTemplateColumns: GRID }}>
@@ -189,7 +191,7 @@ export function Watchlist({ symbols, current, onSelect, favorites, updateFavs, p
               {items.slice(start, end).map((it) => it.k === "h"
                 ? <SectionHeader key={`h-${it.id}`} it={it} onToggle={toggleSec} onRename={renameSec} onDelete={deleteSec} />
                 : <Row key={it.m.symbol} m={it.m} t={tickers[it.m.symbol]} fav={favSet.has(it.m.symbol)} active={it.m.symbol === current} groups={favorites} onSelect={onSelect} onStar={star} onToggleGroup={toggleGroup}
-                    secs={manual ? secs : []} sec={curSec[it.m.symbol] || OTHER} onMove={(s, t) => place(s, t)} onGrip={manual ? onGrip : null} ghost={drag?.sym === it.m.symbol} />)}
+                    secs={secs} sec={curSec[it.m.symbol] || OTHER} onMove={(s, t) => place(s, t)} onGrip={manual ? onGrip : null} ghost={drag?.sym === it.m.symbol} />)}
             </div>
             {drag && <div data-testid="watchlist-drop-indicator" className="absolute left-0 right-0 h-0.5 bg-white pointer-events-none" style={{ top: drag.ins * ROW - 1 }} />}
           </div>
