@@ -1,4 +1,6 @@
 
+import { fetchKlines } from "./api";
+
 const WS_BASE = "wss://fstream.binance.com/market/stream?streams=";
 const REST_BASE = "https://fapi.binance.com";
 
@@ -12,7 +14,7 @@ async function binanceGet(path) {
   return response.json();
 }
 
-// Binance Futures sembol listesi
+// Binance Futures symbol list
 export async function fetchSymbols() {
   const results = await Promise.allSettled([
     binanceGet("/fapi/v1/exchangeInfo"),
@@ -20,18 +22,14 @@ export async function fetchSymbols() {
   ]);
 
   const exchangeInfo =
-    results[0].status === "fulfilled"
-      ? results[0].value
-      : null;
+    results[0].status === "fulfilled" ? results[0].value : null;
 
   if (!exchangeInfo?.symbols?.length) {
     throw new Error("Binance sembol listesi alınamadı");
   }
 
   const fundingInfo =
-    results[1].status === "fulfilled"
-      ? results[1].value
-      : [];
+    results[1].status === "fulfilled" ? results[1].value : [];
 
   const fundingMap = new Map(
     (Array.isArray(fundingInfo) ? fundingInfo : []).map((x) => [
@@ -43,7 +41,7 @@ export async function fetchSymbols() {
   return exchangeInfo.symbols
     .filter((s) =>
       s.status === "TRADING" &&
-      s.contractType === "PERPETUAL" &&
+      ["PERPETUAL", "TRADIFI_PERPETUAL"].includes(s.contractType) &&
       s.quoteAsset === "USDT"
     )
     .map((s) => {
@@ -63,7 +61,7 @@ export async function fetchSymbols() {
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 }
 
-// WebSocket bağlantısı
+// WebSocket class with reconnect
 class Socket {
   constructor(streams, onMsg, onStatus) {
     this.streams = streams;
@@ -72,7 +70,6 @@ class Socket {
     this.closed = false;
     this.open = false;
     this.retryTimer = null;
-
     this.connect();
   }
 
@@ -80,9 +77,7 @@ class Socket {
     if (this.closed) return;
 
     try {
-      this.ws = new WebSocket(
-        WS_BASE + this.streams.join("/")
-      );
+      this.ws = new WebSocket(WS_BASE + this.streams.join("/"));
     } catch {
       this.retry();
       return;
@@ -137,7 +132,7 @@ class Socket {
   }
 }
 
-// Global piyasa verileri
+// Global market store
 export const market = {
   tickers: {},
   listeners: new Set(),
@@ -155,7 +150,6 @@ export const market = {
   onStatus(fn) {
     this.statusListeners.add(fn);
     fn(this.wsOpen);
-
     return () => this.statusListeners.delete(fn);
   },
 
@@ -174,7 +168,6 @@ export const market = {
     this.dirty = true;
   },
 
-  // REST başlangıç verisi ve WebSocket kopma yedeği
   async poll() {
     if (this.polling) return;
 
@@ -220,18 +213,14 @@ export const market = {
     }
   },
 
-  // Tüm piyasa WebSocket akışını başlat
   start() {
     if (this.started) return;
 
     this.started = true;
-
-    // İlk fiyat ve funding görüntüsü
     this.poll();
 
     this.sock = new Socket(
       ["!ticker@arr", "!markPrice@arr@1s"],
-
       (msg) => {
         const data = msg.data;
 
@@ -257,27 +246,19 @@ export const market = {
           });
         }
       },
-
       (open) => {
         this.wsOpen = open;
 
         this.statusListeners.forEach((fn) => fn(open));
 
-        // Bağlantı yeniden açıldığında tam veri yenile
-        if (open) {
-          this.poll();
-        }
+        if (open) this.poll();
       }
     );
 
-    // WebSocket kapalıysa REST yedek
     this.pollTimer = setInterval(() => {
-      if (!this.wsOpen) {
-        this.poll();
-      }
+      if (!this.wsOpen) this.poll();
     }, 15000);
 
-    // UI güncellemelerini grupla
     this.emitTimer = setInterval(() => {
       if (this.dirty) {
         this.dirty = false;
@@ -287,11 +268,10 @@ export const market = {
   },
 };
 
-// Tek sembol ve zaman dilimi için canlı mum akışı
+// Live candles
 export function liveKlines(symbol, interval, onBar) {
   const sock = new Socket(
     [`${symbol.toLowerCase()}@kline_${interval}`],
-
     (msg) => {
       const k = msg.data?.k;
 
@@ -308,14 +288,11 @@ export function liveKlines(symbol, interval, onBar) {
     }
   );
 
-  // WebSocket kesilirse REST yedek
   const intervalId = setInterval(async () => {
     if (sock.open) return;
 
     try {
-      const { fetchKlines } = await import("./api");
       const bars = await fetchKlines(symbol, interval, 2);
-
       bars.forEach(onBar);
     } catch (error) {
       console.warn("Kline yedek verisi alınamadı:", error.message);
