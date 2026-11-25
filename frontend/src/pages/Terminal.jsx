@@ -216,7 +216,6 @@ export default function Terminal() {
     }
   };
 
-  // keepSheetOpen true olduğunda mobil panel açık kalır.
   const selectSymbol = useCallback((s, keepSheetOpen = false) => {
     update({ symbol: s });
     setSel(null);
@@ -306,7 +305,7 @@ export default function Terminal() {
 
       {mobile && (
         <Sheet open={!!sheet} onOpenChange={(o) => !o && setSheet(null)}>
-          <SheetContent side="bottom" className="h-[72dvh] p-0 bg-[#0c0d0f] border-[#2a2e39]" data-testid="mobile-panel-sheet">
+          <SheetContent side="bottom" className="h-[55dvh] p-0 bg-[#0c0d0f] border-[#2a2e39]" data-testid="mobile-panel-sheet">
             <SheetTitle className="sr-only">{sheet}</SheetTitle>
             {sheet && (() => {
               const [k, title, Icon] = PANELS.find((p) => p[0] === sheet);
