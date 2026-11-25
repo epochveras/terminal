@@ -805,7 +805,8 @@ async def alarm_loop():
                 for symbol in sorted(symbols)
             )
 
-            ws_url = f"wss://fstream.binance.com/stream?streams={streams}"
+            # Binance yeni USD-M Futures Market WebSocket adresi.
+            ws_url = f"wss://fstream.binance.com/market/stream?streams={streams}"
 
             logger.info(
                 "Alarm WebSocket bağlanıyor. İzlenen semboller: %s",
@@ -868,15 +869,32 @@ async def alarm_loop():
                     if raw_message is None:
                         continue
 
+                    # Binance WebSocket mesajını çözümle.
                     try:
                         message = json.loads(raw_message)
+
+                        if not isinstance(message, dict):
+                            raise TypeError("Mesaj dict formatında değil")
+
                         trade = message.get("data", message)
+
+                        if not isinstance(trade, dict):
+                            raise TypeError("Trade verisi dict formatında değil")
 
                         symbol = str(
                             trade.get("s", "")
                         ).upper()
 
-                        price = float(trade["p"])
+                        raw_price = trade.get("p")
+
+                        if raw_price is None:
+                            logger.warning(
+                                "Binance mesajında fiyat alanı yok: %s",
+                                str(raw_message)[:500]
+                            )
+                            continue
+
+                        price = float(raw_price)
 
                     except (
                         json.JSONDecodeError,
@@ -885,7 +903,8 @@ async def alarm_loop():
                         ValueError
                     ):
                         logger.warning(
-                            "WebSocket fiyat mesajı çözümlenemedi"
+                            "WebSocket fiyat mesajı çözümlenemedi: %s",
+                            str(raw_message)[:500]
                         )
                         continue
 
@@ -895,9 +914,11 @@ async def alarm_loop():
                     # Sıfır, negatif veya geçersiz fiyatı kabul etme.
                     if not math.isfinite(price) or price <= 0:
                         logger.warning(
-                            "Geçersiz Binance fiyatı yok sayıldı: %s fiyat=%s",
+                            "Geçersiz Binance fiyatı: sembol=%s "
+                            "fiyat=%r ham_mesaj=%s",
                             symbol,
-                            price
+                            raw_price,
+                            str(raw_message)[:500]
                         )
                         continue
 
