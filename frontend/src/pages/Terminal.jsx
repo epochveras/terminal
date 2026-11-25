@@ -90,8 +90,6 @@ export default function Terminal() {
       } catch (error) {
         if (!alive) return;
 
-        // Keep cached symbols if available.
-        // If no cache exists, use a temporary symbol so the terminal can open.
         setSymbols((current) => current?.length ? current : [{
           symbol: settings.symbol || "BTCUSDT",
           tick: "0.01",
@@ -121,12 +119,11 @@ export default function Terminal() {
       clearTimeout(retryTimer);
       off();
     };
-  }, [update]);
+  }, [update, settings.symbol]);
 
   const metaMap = useMemo(() => {
     const map = Object.fromEntries((symbols || []).map((s) => [s.symbol, s]));
 
-    // Keep the currently selected symbol usable even if Binance is unavailable.
     if (!map[symbol]) {
       map[symbol] = {
         symbol,
