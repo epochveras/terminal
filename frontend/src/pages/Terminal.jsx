@@ -216,10 +216,14 @@ export default function Terminal() {
     }
   };
 
-  const selectSymbol = useCallback((s) => {
+  // keepSheetOpen true olduğunda mobil panel açık kalır.
+  const selectSymbol = useCallback((s, keepSheetOpen = false) => {
     update({ symbol: s });
     setSel(null);
-    setSheet(null);
+
+    if (!keepSheetOpen) {
+      setSheet(null);
+    }
   }, [update]);
 
   const setPanel = (k, v) => update((s) => ({ panels: { ...s.panels, [k]: v } }));
@@ -229,7 +233,17 @@ export default function Terminal() {
   };
 
   const content = {
-    watchlist: <Watchlist symbols={symbolList} current={symbol} onSelect={selectSymbol} favorites={favorites} updateFavs={updateFavs} prefs={settings.watchlist} setPrefs={(w) => update({ watchlist: w })} />,
+    watchlist: (
+      <Watchlist
+        symbols={symbolList}
+        current={symbol}
+        onSelect={(s) => selectSymbol(s, true)}
+        favorites={favorites}
+        updateFavs={updateFavs}
+        prefs={settings.watchlist}
+        setPrefs={(w) => update({ watchlist: w })}
+      />
+    ),
     alarms: <AlarmPanel onSelect={selectSymbol} alarms={alarms} symbol={symbol} metaMap={metaMap} add={add} remove={remove} clearHistory={clearHistory} sound={settings.sound} setSound={(v) => update({ sound: v })} push={push} />,
     futures: <FuturesPanel symbol={symbol} meta={meta} />,
   };
