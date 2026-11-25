@@ -129,6 +129,18 @@ _cache_locks: Dict[str, asyncio.Lock] = {}
 BINANCE_COOLDOWN_UNTIL = 0.0
 
 
+async def save_binance_cooldown(until: float):
+    """Ban bitiÅ zamanÄ±nÄ± MongoDB'ye yazar; sÃ¼reÃ§ yeniden baÅlasa da korunur."""
+    await db.system_state.update_one(
+        {"_id": "binance_cooldown"},
+        {
+            "$max": {"until": until},
+            "$set": {"updated_at": now_iso()}
+        },
+        upsert=True
+    )
+
+
 async def bget(path: str, params: Optional[dict] = None, ttl: float = 2.0):
     """REST proxy with request coalescing and shared Binance 418/429 cooldown."""
     global BINANCE_COOLDOWN_UNTIL
@@ -172,7 +184,16 @@ async def bget(path: str, params: Optional[dict] = None, ttl: float = 2.0):
                     delay = max(delay, int(int(match.group(1)) / 1000 - time.time()) + 5)
             except Exception:
                 pass
-            BINANCE_COOLDOWN_UNTIL = max(BINANCE_COOLDOWN_UNTIL, time.time() + delay)
+
+            BINANCE_COOLDOWN_UNTIL = max(
+                BINANCE_COOLDOWN_UNTIL,
+                time.time() + delay
+            )
+            try:
+                await save_binance_cooldown(BINANCE_COOLDOWN_UNTIL)
+            except Exception:
+                logger.exception("Binance ban sÃ¼resi MongoDB'ye kaydedilemedi")
+
             logger.error("Binance HTTP %s; tÃ¼m REST istekleri %s saniye durduruldu", response.status_code, delay)
             raise HTTPException(503, f"Binance hÄ±z sÄ±nÄ±rÄ± ({response.status_code}); {delay} saniye bekleniyor.")
 
@@ -380,11 +401,20 @@ def fmt_tr(v: float) -> str:
 
 
 async def alarm_loop():
-    """Server-side alarm checks; independent of browser/app state."""
+    """Aktif alarm yokken Binance fiyat taramasÄ± yapmaz."""
     poll_seconds = 5
+
     while True:
         try:
-            # One all-symbol request, cached for four seconds; no browser polling needed.
+            active_alarm = await db.alarms.find_one(
+                {"active": True},
+                {"_id": 1}
+            )
+
+            if not active_alarm:
+                await asyncio.sleep(15)
+                continue
+
             data = await bget("/fapi/v1/ticker/price", ttl=4.0)
             for item in data:
                 LAST_PRICES[item["symbol"]] = float(item["price"])
@@ -393,24 +423,36 @@ async def alarm_loop():
                 price = LAST_PRICES.get(alarm["symbol"])
                 if price is None:
                     continue
-                triggered = price >= alarm["price"] if alarm["direction"] == "above" else price <= alarm["price"]
+
+                triggered = (
+                    price >= alarm["price"]
+                    if alarm["direction"] == "above"
+                    else price <= alarm["price"]
+                )
                 if not triggered:
                     continue
+
                 result = await db.alarms.update_one(
                     {"id": alarm["id"], "active": True},
-                    {"$set": {"active": False, "triggered_at": now_iso(), "trigger_price": price}}
+                    {"$set": {
+                        "active": False,
+                        "triggered_at": now_iso(),
+                        "trigger_price": price
+                    }}
                 )
+
                 if result.modified_count:
                     arrow = "yukarÄ± kesti" if alarm["direction"] == "above" else "aÅaÄÄ± kesti"
                     task = asyncio.create_task(push_user(alarm["user_id"], {
                         "title": f"â° {alarm['symbol']} alarm",
                         "body": f"{alarm['symbol']} {fmt_tr(alarm['price'])} seviyesini {arrow} Â· Fiyat {fmt_tr(price)}",
-                        "tag": alarm["id"], "url": f"/?symbol={alarm['symbol']}"
+                        "tag": alarm["id"],
+                        "url": f"/?symbol={alarm['symbol']}"
                     }))
                     PUSH_TASKS.add(task)
                     task.add_done_callback(PUSH_TASKS.discard)
+
         except HTTPException as exc:
-            # bget() has already activated a shared cooldown for 418/429.
             logger.warning("alarm loop durakladÄ±: %s", exc.detail)
         except Exception:
             logger.exception("alarm loop beklenmeyen hata")
@@ -420,14 +462,34 @@ async def alarm_loop():
 
 
 app.include_router(api)
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=os.environ['CORS_ORIGINS'].split(','),
-                   allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ['CORS_ORIGINS'].split(','),
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 
 @app.on_event("startup")
 async def startup():
-    global http
+    global http, BINANCE_COOLDOWN_UNTIL
+
     http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 Epochveras"})
+
+    # Daha Ã¶nce kaydedilmiÅ Binance ban sÃ¼resini Render yeniden baÅlasa da geri yÃ¼kle.
+    cooldown_doc = await db.system_state.find_one({"_id": "binance_cooldown"})
+    if cooldown_doc:
+        BINANCE_COOLDOWN_UNTIL = float(cooldown_doc.get("until", 0.0) or 0.0)
+
+    if BINANCE_COOLDOWN_UNTIL > time.time():
+        logger.warning(
+            "Binance korumasÄ± devam ediyor. Kalan sÃ¼re: %s saniye",
+            int(BINANCE_COOLDOWN_UNTIL - time.time())
+        )
+    else:
+        BINANCE_COOLDOWN_UNTIL = 0.0
+
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
     await db.alarms.create_index([("user_id", 1), ("created_at", -1)])
@@ -437,10 +499,18 @@ async def startup():
     await db.push_subs.create_index("endpoint", unique=True)
     await db.push_subs.create_index("user_id")
     await db.login_attempts.create_index("identifier")
+
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     if not await db.users.find_one({"email": admin_email}):
-        await db.users.insert_one({"id": str(uuid.uuid4()), "email": admin_email, "name": "Admin",
-                                   "password_hash": hash_password(os.environ["ADMIN_PASSWORD"]), "role": "admin", "created_at": now_iso()})
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "email": admin_email,
+            "name": "Admin",
+            "password_hash": hash_password(os.environ["ADMIN_PASSWORD"]),
+            "role": "admin",
+            "created_at": now_iso()
+        })
+
     app.state.alarm_task = asyncio.create_task(alarm_loop())
 
 
@@ -449,5 +519,6 @@ async def shutdown():
     app.state.alarm_task.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.alarm_task
-    await http.aclose()
+    if http is not None:
+        await http.aclose()
     client.close()
