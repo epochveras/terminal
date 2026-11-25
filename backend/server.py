@@ -1,4 +1,3 @@
-
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -801,7 +800,7 @@ async def alarm_loop():
                 continue
 
             streams = "/".join(
-                f"{symbol.lower()}@trade"
+                f"{symbol.lower()}@aggTrade"
                 for symbol in sorted(symbols)
             )
 
