@@ -1,6 +1,5 @@
 
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
 import { fmtPrice, fmtFunding, fmtCountdown, fmtVol } from "@/lib/format";
 import { useTickers } from "./Watchlist";
 
@@ -27,15 +26,16 @@ function RatioBlock({ title, rows = [], testid }) {
     );
   }
 
-  const L = +last.longAccount * 100;
-  const S = +last.shortAccount * 100;
+  const L = Number(last.longAccount) * 100;
+  const S = Number(last.shortAccount) * 100;
+  const ratio = Number(last.longShortRatio);
 
   return (
     <div className="px-3 py-2.5 border-b border-[#131722]" data-testid={testid}>
       <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-[#787b86] mb-1.5">
         <span>{title}</span>
         <span className="num text-[13px] text-[#d1d4dc] normal-case">
-          {(+last.longShortRatio).toFixed(4)}
+          {Number.isFinite(ratio) ? ratio.toFixed(4) : "—"}
         </span>
       </div>
 
@@ -75,25 +75,27 @@ export function FuturesPanel({ symbol, meta }) {
 
     const load = async () => {
       const encodedSymbol = encodeURIComponent(symbol);
+      const query = `symbol=${encodedSymbol}&period=${period}&limit=1`;
 
       const results = await Promise.allSettled([
         binanceGet(`/fapi/v1/openInterest?symbol=${encodedSymbol}`),
 
         binanceGet(
-          `/futures/data/globalLongShortAccountRatio?symbol=${encodedSymbol}&period=${period}&limit=1`
+          `/futures/data/globalLongShortAccountRatio?${query}`
         ),
 
-        // Top Trader verileri mevcut backend üzerinden korunuyor.
-        api.get("/market/futures", {
-          params: { symbol, period },
-        }),
+        binanceGet(
+          `/futures/data/topLongShortAccountRatio?${query}`
+        ),
+
+        binanceGet(
+          `/futures/data/topLongShortPositionRatio?${query}`
+        ),
       ]);
 
       if (!alive) return;
 
       setData((previous) => ({
-        ...previous,
-
         openInterest:
           results[0].status === "fulfilled"
             ? results[0].value
@@ -106,14 +108,23 @@ export function FuturesPanel({ symbol, meta }) {
 
         topAccount:
           results[2].status === "fulfilled"
-            ? results[2].value?.data?.topAccount
+            ? results[2].value
             : previous?.topAccount,
 
         topPosition:
-          results[2].status === "fulfilled"
-            ? results[2].value?.data?.topPosition
+          results[3].status === "fulfilled"
+            ? results[3].value
             : previous?.topPosition,
       }));
+
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          console.warn(
+            `Futures verisi ${index} alınamadı:`,
+            result.reason
+          );
+        }
+      });
     };
 
     load();
@@ -128,9 +139,9 @@ export function FuturesPanel({ symbol, meta }) {
     };
   }, [symbol, period]);
 
-  const fr = t.r ?? data?.premium?.lastFundingRate;
-  const nft = t.T ?? data?.premium?.nextFundingTime;
-  const mark = t.m || +data?.premium?.markPrice;
+  const fr = t.r;
+  const nft = t.T;
+  const mark = Number(t.m);
 
   const oi = Number(data?.openInterest?.openInterest);
 
@@ -154,9 +165,9 @@ export function FuturesPanel({ symbol, meta }) {
         l="Funding rate"
         v={`${fmtFunding(fr)} (${meta?.fundingHours ?? 8} saat)`}
         cls={
-          +fr > 0
+          Number(fr) > 0
             ? "text-[#0ecb81]"
-            : +fr < 0
+            : Number(fr) < 0
               ? "text-[#f6465d]"
               : ""
         }
