@@ -6,7 +6,7 @@ import { CommandDialog, CommandInput, CommandList, CommandEmpty, CommandItem } f
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { market } from "@/lib/market";
+import { market, fetchSymbols } from "@/lib/market";
 import { decFromTick } from "@/lib/format";
 import { EPOCH_SCHEMA, RSI_SCHEMA } from "@/lib/indicators";
 import { unlockAudio } from "@/lib/alerts";
@@ -70,10 +70,11 @@ export default function Terminal() {
 
     const load = async () => {
       try {
-        const response = await api.get("/market/symbols", { timeout: 12000 });
+        const response = await fetchSymbols();
+
         if (!alive) return;
 
-        const list = response.data.map((s) => ({
+        const list = response.map((s) => ({
           ...s,
           dec: decFromTick(s.tick),
         }));
@@ -88,6 +89,8 @@ export default function Terminal() {
           }
         }
       } catch (error) {
+        console.warn("Binance sembol listesi alınamadı:", error);
+
         if (!alive) return;
 
         setSymbols((current) => current?.length ? current : [{
