@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import bcrypt
 import httpx
 import jwt
+import websockets
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -400,65 +401,136 @@ def fmt_tr(v: float) -> str:
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _alarm_symbols(alarms: List[dict]) -> set:
+    """Only subscribe to symbols that currently have active alarms."""
+    return {
+        str(a.get("symbol", "")).upper()
+        for a in alarms
+        if str(a.get("symbol", "")).isalnum()
+    }
+
+
+async def _load_active_alarms() -> List[dict]:
+    return await db.alarms.find({"active": True}, {"_id": 0}).to_list(1000)
+
+
+async def _fire_alarm(alarm: dict, price: float):
+    """Atomically deactivate an alarm before sending its push notification."""
+    result = await db.alarms.update_one(
+        {"id": alarm["id"], "active": True},
+        {"$set": {
+            "active": False,
+            "triggered_at": now_iso(),
+            "trigger_price": price
+        }}
+    )
+
+    if not result.modified_count:
+        return
+
+    arrow = "yukarÄ± kesti" if alarm["direction"] == "above" else "aÅaÄÄ± kesti"
+    task = asyncio.create_task(push_user(alarm["user_id"], {
+        "title": f"â° {alarm['symbol']} alarm",
+        "body": f"{alarm['symbol']} {fmt_tr(alarm['price'])} seviyesini {arrow} Â· Fiyat {fmt_tr(price)}",
+        "tag": alarm["id"],
+        "url": f"/?symbol={alarm['symbol']}"
+    }))
+    PUSH_TASKS.add(task)
+    task.add_done_callback(PUSH_TASKS.discard)
+
+
 async def alarm_loop():
-    """Aktif alarm yokken Binance fiyat taramasÄ± yapmaz."""
-    poll_seconds = 5
+    """
+    Binance USD-M Futures trade WebSocket Ã¼zerinden yalnÄ±zca aktif alarm
+    bulunan sembolleri izler. Alarm fiyatlarÄ± REST ile taranmaz.
+    MongoDB alarm listesi 10 saniyede bir yenilenir.
+    """
+    refresh_seconds = 10
+    reconnect_delay = 3
 
     while True:
         try:
-            active_alarm = await db.alarms.find_one(
-                {"active": True},
-                {"_id": 1}
-            )
+            alarms = await _load_active_alarms()
+            symbols = _alarm_symbols(alarms)
 
-            if not active_alarm:
+            if not symbols:
                 await asyncio.sleep(15)
                 continue
 
-            data = await bget("/fapi/v1/ticker/price", ttl=4.0)
-            for item in data:
-                LAST_PRICES[item["symbol"]] = float(item["price"])
+            streams = "/".join(f"{symbol.lower()}@trade" for symbol in sorted(symbols))
+            ws_url = f"wss://fstream.binance.com/stream?streams={streams}"
 
-            async for alarm in db.alarms.find({"active": True}, {"_id": 0}):
-                price = LAST_PRICES.get(alarm["symbol"])
-                if price is None:
-                    continue
+            logger.info("Alarm WebSocket baÄlanÄ±yor. Ä°zlenen semboller: %s", ", ".join(sorted(symbols)))
 
-                triggered = (
-                    price >= alarm["price"]
-                    if alarm["direction"] == "above"
-                    else price <= alarm["price"]
-                )
-                if not triggered:
-                    continue
+            async with websockets.connect(
+                ws_url,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=2**20
+            ) as ws:
+                logger.info("Alarm WebSocket baÄlandÄ±. Aktif sembol sayÄ±sÄ±: %s", len(symbols))
+                last_refresh = time.monotonic()
+                alarm_cache = {}
+                for alarm in alarms:
+                    alarm_cache.setdefault(alarm["symbol"].upper(), []).append(alarm)
 
-                result = await db.alarms.update_one(
-                    {"id": alarm["id"], "active": True},
-                    {"$set": {
-                        "active": False,
-                        "triggered_at": now_iso(),
-                        "trigger_price": price
-                    }}
-                )
+                while True:
+                    try:
+                        raw_message = await asyncio.wait_for(ws.recv(), timeout=refresh_seconds)
+                    except asyncio.TimeoutError:
+                        raw_message = None
 
-                if result.modified_count:
-                    arrow = "yukarÄ± kesti" if alarm["direction"] == "above" else "aÅaÄÄ± kesti"
-                    task = asyncio.create_task(push_user(alarm["user_id"], {
-                        "title": f"â° {alarm['symbol']} alarm",
-                        "body": f"{alarm['symbol']} {fmt_tr(alarm['price'])} seviyesini {arrow} Â· Fiyat {fmt_tr(price)}",
-                        "tag": alarm["id"],
-                        "url": f"/?symbol={alarm['symbol']}"
-                    }))
-                    PUSH_TASKS.add(task)
-                    task.add_done_callback(PUSH_TASKS.discard)
+                    # Periodically refresh alarm data without reconnecting if the symbol set is unchanged.
+                    if time.monotonic() - last_refresh >= refresh_seconds:
+                        refreshed = await _load_active_alarms()
+                        refreshed_symbols = _alarm_symbols(refreshed)
+                        if refreshed_symbols != symbols:
+                            logger.info("Aktif alarm sembolleri deÄiÅti; WebSocket aboneliÄi yenilenecek")
+                            break
 
-        except HTTPException as exc:
-            logger.warning("alarm loop durakladÄ±: %s", exc.detail)
-        except Exception:
-            logger.exception("alarm loop beklenmeyen hata")
+                        alarm_cache = {}
+                        for alarm in refreshed:
+                            alarm_cache.setdefault(alarm["symbol"].upper(), []).append(alarm)
+                        last_refresh = time.monotonic()
 
-        cooldown = max(0.0, BINANCE_COOLDOWN_UNTIL - time.time())
-        await asyncio.sleep(max(poll_seconds, min(cooldown, 300.0)))
+                    if raw_message is None:
+                        continue
+
+                    try:
+                        message = json.loads(raw_message)
+                        trade = message.get("data", message)
+                        symbol = str(trade.get("s", "")).upper()
+                        price = float(trade["p"])
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        logger.warning("WebSocket fiyat mesajÄ± Ã§Ã¶zÃ¼mlenemedi")
+                        continue
+
+                    if not symbol:
+                        continue
+
+                    LAST_PRICES[symbol] = price
+
+                    # Check only alarms for the symbol that just received a trade.
+                    for alarm in list(alarm_cache.get(symbol, [])):
+                        triggered = (
+                            price >= float(alarm["price"])
+                            if alarm["direction"] == "above"
+                            else price <= float(alarm["price"])
+                        )
+                        if triggered:
+                            await _fire_alarm(alarm, price)
+                            alarm_cache[symbol].remove(alarm)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Alarm WebSocket baÄlantÄ±sÄ± koptu/hata oluÅtu: %s", exc)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
+        else:
+            # A normal exit means the active alarm symbol list changed.
+            reconnect_delay = 3
 
 
 app.include_router(api)
@@ -477,14 +549,14 @@ async def startup():
 
     http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 Epochveras"})
 
-    # Daha Ã¶nce kaydedilmiÅ Binance ban sÃ¼resini Render yeniden baÅlasa da geri yÃ¼kle.
+    # Restore the previously persisted REST API cooldown after a Render restart.
     cooldown_doc = await db.system_state.find_one({"_id": "binance_cooldown"})
     if cooldown_doc:
         BINANCE_COOLDOWN_UNTIL = float(cooldown_doc.get("until", 0.0) or 0.0)
 
     if BINANCE_COOLDOWN_UNTIL > time.time():
         logger.warning(
-            "Binance korumasÄ± devam ediyor. Kalan sÃ¼re: %s saniye",
+            "Binance REST korumasÄ± devam ediyor. Kalan sÃ¼re: %s saniye",
             int(BINANCE_COOLDOWN_UNTIL - time.time())
         )
     else:
@@ -519,6 +591,10 @@ async def shutdown():
     app.state.alarm_task.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.alarm_task
+
+    if PUSH_TASKS:
+        await asyncio.gather(*list(PUSH_TASKS), return_exceptions=True)
+
     if http is not None:
         await http.aclose()
     client.close()
