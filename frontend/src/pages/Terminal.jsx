@@ -60,7 +60,23 @@ export default function Terminal() {
   const [indDlg, setIndDlg] = useState(null);
   const [live, setLive] = useState(false);
   const [sheet, setSheet] = useState(null);
-  const [drawingOpen, setDrawingOpen] = useState(true);
+
+  // Çizim panelinin tercihini yenileme sonrasında da koru.
+  const [drawingOpen, setDrawingOpen] = useState(() => {
+    try {
+      return localStorage.getItem("ev_drawing_open") !== "false";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ev_drawing_open", String(drawingOpen));
+    } catch {
+      // Tercih kaydı başarısız olsa bile uygulama çalışmaya devam eder.
+    }
+  }, [drawingOpen]);
 
   const engine = useRef(null);
   const mobile = useIsMobile();
