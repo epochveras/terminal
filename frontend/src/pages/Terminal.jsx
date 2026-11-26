@@ -1,6 +1,6 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { List, Bell, Activity, X } from "lucide-react";
+import { List, Bell, Activity, X, Pencil } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { CommandDialog, CommandInput, CommandList, CommandEmpty, CommandItem } from "@/components/ui/command";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
@@ -60,6 +60,8 @@ export default function Terminal() {
   const [indDlg, setIndDlg] = useState(null);
   const [live, setLive] = useState(false);
   const [sheet, setSheet] = useState(null);
+  const [drawingOpen, setDrawingOpen] = useState(true);
+
   const engine = useRef(null);
   const mobile = useIsMobile();
   const symbol = settings.symbol, tf = settings.tf;
@@ -257,8 +259,15 @@ export default function Terminal() {
         onAlarm={() => togglePanel("alarms")} hist={hist} onUndo={() => engine.current?.undo()} onRedo={() => engine.current?.redo()} live={live} user={user} logout={logout} />
 
       <div className="flex-1 min-h-0 flex">
-        <DrawingToolbar tool={tool} setTool={setTool} magnet={settings.magnet} setMagnet={(m) => update({ magnet: m })}
-          onClear={() => setConfirmClear(true)} />
+        {drawingOpen && (
+          <DrawingToolbar
+            tool={tool}
+            setTool={setTool}
+            magnet={settings.magnet}
+            setMagnet={(m) => update({ magnet: m })}
+            onClear={() => setConfirmClear(true)}
+          />
+        )}
 
         <PanelGroup direction="horizontal" autoSaveId="ev-main" className="flex-1 min-w-0">
           <Panel id="chart" order={1} minSize={35}>
@@ -290,16 +299,38 @@ export default function Terminal() {
         <div className="w-11 shrink-0 bg-[#0c0d0f] border-l border-[#2a2e39] flex flex-col items-center gap-1 py-2" data-testid="right-rail">
           {PANELS.map(([k, title, Icon]) => {
             const on = mobile ? sheet === k : settings.panels[k];
+
             return (
-              <button key={k} data-testid={`${k === "futures" ? "futures-data" : k}-tab-button`} title={title} onClick={() => togglePanel(k)}
-                className={`relative w-10 h-10 md:w-9 md:h-9 flex items-center justify-center rounded-md ${on ? "bg-[#1e222d] text-white" : "text-[#b2b5be] hover:bg-[#171b26]"}`}>
+              <button
+                key={k}
+                data-testid={`${k === "futures" ? "futures-data" : k}-tab-button`}
+                title={title}
+                onClick={() => togglePanel(k)}
+                className={`relative w-10 h-10 md:w-9 md:h-9 flex items-center justify-center rounded-md ${on ? "bg-[#1e222d] text-white" : "text-[#b2b5be] hover:bg-[#171b26]"}`}
+              >
                 <Icon size={18} />
+
                 {k === "alarms" && activeCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#e0a020] text-black text-[10px] font-bold flex items-center justify-center">{activeCount}</span>
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#e0a020] text-black text-[10px] font-bold flex items-center justify-center">
+                    {activeCount}
+                  </span>
                 )}
               </button>
             );
           })}
+
+          <button
+            data-testid="drawing-toolbar-toggle"
+            title="Çizim araçları"
+            onClick={() => setDrawingOpen((v) => !v)}
+            className={`relative w-10 h-10 md:w-9 md:h-9 flex items-center justify-center rounded-md ${
+              drawingOpen
+                ? "bg-[#1e222d] text-white"
+                : "text-[#b2b5be] hover:bg-[#171b26]"
+            }`}
+          >
+            <Pencil size={18} />
+          </button>
         </div>
       </div>
 
