@@ -1,3 +1,4 @@
+
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -43,6 +44,21 @@ http: Optional[httpx.AsyncClient] = None
 LAST_PRICES: Dict[str, float] = {}
 LAST_PRICE_TIMES: Dict[str, float] = {}
 PUSH_TASKS: set = set()
+
+# ---------------- SFP MONITOR STATE ----------------
+
+SFP_BARS: Dict[str, List[dict]] = {}
+SFP_LAST_BOOTSTRAP: Dict[str, float] = {}
+
+SFP_INTERVAL = "30m"
+SFP_HISTORY_LIMIT = 200
+SFP_SWING_LEN = 5
+SFP_RIGHT_BARS = 1
+SFP_EMA_FAST = 38
+SFP_EMA_SLOW = 62
+
+SFP_REFRESH_SECONDS = 10
+SFP_RETRY_SECONDS = 60
 
 
 def now_iso() -> str:
@@ -781,10 +797,6 @@ async def alarm_loop():
     """
     Binance USD-M Futures trade WebSocket üzerinden
     yalnızca aktif alarm bulunan sembolleri izler.
-
-    Yeni alarm ilk geçerli WebSocket fiyatında referans alınır.
-    İlk fiyat alarmı tetiklemez.
-    Sonraki fiyat hareketlerinde hedef kontrol edilir.
     """
 
     refresh_seconds = 10
@@ -804,7 +816,6 @@ async def alarm_loop():
                 for symbol in sorted(symbols)
             )
 
-            # Binance yeni USD-M Futures Market WebSocket adresi.
             ws_url = f"wss://fstream.binance.com/market/stream?streams={streams}"
 
             logger.info(
@@ -843,7 +854,6 @@ async def alarm_loop():
                     except asyncio.TimeoutError:
                         raw_message = None
 
-                    # Alarm listesini düzenli yenile.
                     if time.monotonic() - last_refresh >= refresh_seconds:
                         refreshed = await _load_active_alarms()
                         refreshed_symbols = _alarm_symbols(refreshed)
@@ -868,7 +878,6 @@ async def alarm_loop():
                     if raw_message is None:
                         continue
 
-                    # Binance WebSocket mesajını çözümle.
                     try:
                         message = json.loads(raw_message)
 
@@ -910,39 +919,28 @@ async def alarm_loop():
                     if not symbol:
                         continue
 
-                    # Sıfır, negatif veya geçersiz fiyatı kabul etme.
                     if not math.isfinite(price) or price <= 0:
                         logger.warning(
-                            "Geçersiz Binance fiyatı: sembol=%s "
-                            "fiyat=%r ham_mesaj=%s",
+                            "Geçersiz Binance fiyatı: sembol=%s fiyat=%r",
                             symbol,
-                            raw_price,
-                            str(raw_message)[:500]
+                            raw_price
                         )
                         continue
 
                     LAST_PRICES[symbol] = price
                     LAST_PRICE_TIMES[symbol] = time.time()
 
-                    # Yalnızca gelen sembolün alarmlarını kontrol et.
                     for alarm in list(alarm_cache.get(symbol, [])):
-
                         target = float(alarm["price"])
 
-                        if (
-                            not math.isfinite(target)
-                            or target <= 0
-                        ):
+                        if not math.isfinite(target) or target <= 0:
                             logger.warning(
                                 "Geçersiz alarm seviyesi yok sayıldı: %s",
                                 alarm.get("id")
                             )
                             continue
 
-                        # Yeni alarmın ilk canlı fiyatı referans alınır.
-                        # Bu ilk fiyatla alarm kesinlikle tetiklenmez.
                         if not alarm.get("armed", False):
-
                             if price == target:
                                 logger.info(
                                     "Alarm referans fiyatı hedefe eşit; "
@@ -990,7 +988,6 @@ async def alarm_loop():
 
                             continue
 
-                        # İlk referans fiyatından sonraki hareketleri kontrol et.
                         triggered = (
                             price >= target
                             if alarm["direction"] == "above"
@@ -1019,6 +1016,618 @@ async def alarm_loop():
             reconnect_delay = 3
 
 
+# ============================================================
+# EPOCH SFP ALERT SYSTEM
+# ============================================================
+
+def sfp_pivot(src: List[float], left: int, right: int, high: bool):
+    """
+    Epoch JS pivot() fonksiyonunun Python karşılığı.
+    Pivot, right bar gecikmesiyle onaylanır.
+    """
+
+    out = [None] * len(src)
+
+    for i in range(left + right, len(src)):
+        p = i - right
+        value = src[p]
+
+        if value is None or not math.isfinite(value):
+            continue
+
+        ok = True
+
+        for j in range(p - left, p):
+            v = src[j]
+
+            if v is None or not math.isfinite(v):
+                ok = False
+                break
+
+            if high and v > value:
+                ok = False
+                break
+
+            if not high and v < value:
+                ok = False
+                break
+
+        if not ok:
+            continue
+
+        for j in range(p + 1, i + 1):
+            v = src[j]
+
+            if v is None or not math.isfinite(v):
+                ok = False
+                break
+
+            if high and v >= value:
+                ok = False
+                break
+
+            if not high and v <= value:
+                ok = False
+                break
+
+        if ok:
+            out[i] = value
+
+    return out
+
+
+def ema_last(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length:
+        return None
+
+    alpha = 2.0 / (length + 1.0)
+    result = values[0]
+
+    for value in values[1:]:
+        result = (value * alpha) + (result * (1.0 - alpha))
+
+    return result
+
+
+def epoch_sfp_conditions(bars: List[dict]) -> dict:
+    """
+    Epoch SFP algoritmasının güncel mumdaki koşullarını hesaplar.
+
+    Bearish:
+        high > swing high
+        open < swing high
+        close < swing high
+
+    Bullish:
+        low < swing low
+        open > swing low
+        close > swing low
+    """
+
+    if len(bars) < SFP_SWING_LEN + SFP_RIGHT_BARS + 2:
+        return {
+            "bull": False,
+            "bear": False,
+            "ema_fast": None,
+            "ema_slow": None
+        }
+
+    highs = [float(b["h"]) for b in bars]
+    lows = [float(b["l"]) for b in bars]
+    closes = [float(b["c"]) for b in bars]
+
+    ph = sfp_pivot(
+        highs,
+        SFP_SWING_LEN,
+        SFP_RIGHT_BARS,
+        True
+    )
+
+    pl = sfp_pivot(
+        lows,
+        SFP_SWING_LEN,
+        SFP_RIGHT_BARS,
+        False
+    )
+
+    swing_high = None
+    swing_low = None
+
+    last_index = len(bars) - 1
+
+    for i in range(len(bars)):
+        if ph[i] is not None:
+            swing_high = ph[i]
+
+        if pl[i] is not None:
+            swing_low = pl[i]
+
+    current = bars[last_index]
+
+    bull = False
+    bear = False
+
+    if swing_high is not None:
+        bear = (
+            current["h"] > swing_high
+            and current["o"] < swing_high
+            and current["c"] < swing_high
+        )
+
+    if swing_low is not None:
+        bull = (
+            current["l"] < swing_low
+            and current["o"] > swing_low
+            and current["c"] > swing_low
+        )
+
+    fast = ema_last(closes, SFP_EMA_FAST)
+    slow = ema_last(closes, SFP_EMA_SLOW)
+
+    return {
+        "bull": bull,
+        "bear": bear,
+        "ema_fast": fast,
+        "ema_slow": slow
+    }
+
+
+def _parse_binance_kline(row: list) -> dict:
+    return {
+        "t": int(row[0]),
+        "o": float(row[1]),
+        "h": float(row[2]),
+        "l": float(row[3]),
+        "c": float(row[4])
+    }
+
+
+async def _bootstrap_sfp_symbol(symbol: str):
+    """
+    EMA ve pivot hesaplaması için geçmiş 30m mumlarını yükler.
+    REST koruması aktifse hata verir; ana takip görevi devam eder.
+    """
+
+    try:
+        data = await bget(
+            "/fapi/v1/klines",
+            {
+                "symbol": symbol,
+                "interval": SFP_INTERVAL,
+                "limit": SFP_HISTORY_LIMIT
+            },
+            ttl=5
+        )
+
+        bars = [
+            _parse_binance_kline(row)
+            for row in data
+            if isinstance(row, list) and len(row) >= 5
+        ]
+
+        if len(bars) < SFP_EMA_SLOW:
+            logger.warning(
+                "SFP geçmiş verisi yetersiz: %s mum=%s",
+                symbol,
+                len(bars)
+            )
+            return False
+
+        SFP_BARS[symbol] = bars[-SFP_HISTORY_LIMIT:]
+        SFP_LAST_BOOTSTRAP[symbol] = time.time()
+
+        logger.info(
+            "SFP geçmiş mumları yüklendi: %s mum=%s",
+            symbol,
+            len(SFP_BARS[symbol])
+        )
+
+        return True
+
+    except Exception as exc:
+        logger.warning(
+            "SFP geçmiş mumları alınamadı: %s hata=%s",
+            symbol,
+            exc
+        )
+        return False
+
+
+async def _load_favorite_users() -> Dict[str, set]:
+    """
+    Kullanıcıların tüm favori gruplarını tarar.
+    Sonuç: {SYMBOL: {user_id, ...}}
+    """
+
+    result: Dict[str, set] = {}
+
+    cursor = db.workspaces.find(
+        {},
+        {
+            "_id": 0,
+            "user_id": 1,
+            "favorites": 1
+        }
+    )
+
+    async for doc in cursor:
+        user_id = doc.get("user_id")
+        favorites = doc.get("favorites") or []
+
+        if not user_id or not isinstance(favorites, list):
+            continue
+
+        for group in favorites:
+            if not isinstance(group, dict):
+                continue
+
+            symbols = group.get("symbols", [])
+
+            if not isinstance(symbols, list):
+                continue
+
+            for raw_symbol in symbols:
+                symbol = str(raw_symbol).upper().strip()
+
+                if not symbol.isalnum():
+                    continue
+
+                result.setdefault(symbol, set()).add(user_id)
+
+    return result
+
+
+async def _send_sfp_notification(
+    user_id: str,
+    symbol: str,
+    direction: str,
+    candle_time: int,
+    price: float,
+    ema_fast: float,
+    ema_slow: float
+):
+    """
+    Aynı kullanıcı/coin/yön/mum için tek event kaydı oluşturur.
+    Gönderim başarısızsa sonraki güncellemelerde yeniden deneyebilir.
+    """
+
+    event_key = (
+        f"{user_id}:{symbol}:{direction}:{candle_time}"
+    )
+
+    event = await db.sfp_events.find_one({
+        "event_key": event_key
+    })
+
+    if event and event.get("sent"):
+        return
+
+    if event:
+        last_attempt = float(event.get("last_attempt", 0) or 0)
+
+        if time.time() - last_attempt < 60:
+            return
+
+    await db.sfp_events.update_one(
+        {"event_key": event_key},
+        {
+            "$set": {
+                "user_id": user_id,
+                "symbol": symbol,
+                "direction": direction,
+                "candle_time": candle_time,
+                "last_attempt": time.time(),
+                "updated_at": now_iso()
+            },
+            "$setOnInsert": {
+                "event_key": event_key,
+                "created_at": now_iso(),
+                "sent": False
+            }
+        },
+        upsert=True
+    )
+
+    if direction == "LONG":
+        title = f"🟢 {symbol} LONG SFP"
+        body = (
+            f"30m Bullish SFP oluştu. "
+            f"EMA 38 ({fmt_tr(ema_fast)}) > "
+            f"EMA 62 ({fmt_tr(ema_slow)}). "
+            f"Fiyat: {fmt_tr(price)}"
+        )
+    else:
+        title = f"🔴 {symbol} SHORT SFP"
+        body = (
+            f"30m Bearish SFP oluştu. "
+            f"EMA 38 ({fmt_tr(ema_fast)}) < "
+            f"EMA 62 ({fmt_tr(ema_slow)}). "
+            f"Fiyat: {fmt_tr(price)}"
+        )
+
+    tag = f"sfp-{symbol}-{direction}-{candle_time}"
+
+    sent = await push_user(
+        user_id,
+        {
+            "title": title,
+            "body": body,
+            "tag": tag,
+            "url": f"/?symbol={symbol}"
+        }
+    )
+
+    await db.sfp_events.update_one(
+        {"event_key": event_key},
+        {
+            "$set": {
+                "sent": sent > 0,
+                "sent_count": sent,
+                "last_attempt": time.time(),
+                "updated_at": now_iso()
+            }
+        }
+    )
+
+    if sent:
+        logger.info(
+            "SFP bildirimi gönderildi: %s %s user=%s mum=%s",
+            symbol,
+            direction,
+            user_id[:8],
+            candle_time
+        )
+    else:
+        logger.warning(
+            "SFP bildirimi gönderilemedi/abonelik yok: %s %s user=%s",
+            symbol,
+            direction,
+            user_id[:8]
+        )
+
+
+async def _process_sfp_kline(
+    symbol: str,
+    kline: dict,
+    favorite_users: Dict[str, set]
+):
+    """
+    Canlı 30m mumunu günceller ve Epoch SFP + EMA şartlarını kontrol eder.
+    """
+
+    try:
+        candle_time = int(kline["t"])
+
+        bar = {
+            "t": candle_time,
+            "o": float(kline["o"]),
+            "h": float(kline["h"]),
+            "l": float(kline["l"]),
+            "c": float(kline["c"])
+        }
+
+        if any(
+            not math.isfinite(v) or v <= 0
+            for v in (bar["o"], bar["h"], bar["l"], bar["c"])
+        ):
+            return
+
+    except (KeyError, TypeError, ValueError):
+        return
+
+    bars = SFP_BARS.get(symbol)
+
+    if not bars:
+        return
+
+    if bars[-1]["t"] == candle_time:
+        bars[-1] = bar
+
+    elif bars[-1]["t"] < candle_time:
+        bars.append(bar)
+        bars[:] = bars[-SFP_HISTORY_LIMIT:]
+
+    else:
+        return
+
+    users = favorite_users.get(symbol)
+
+    if not users:
+        return
+
+    result = epoch_sfp_conditions(bars)
+
+    fast = result["ema_fast"]
+    slow = result["ema_slow"]
+
+    if fast is None or slow is None:
+        return
+
+    price = bar["c"]
+
+    # Bullish SFP + EMA Fast > EMA Slow = LONG
+    if result["bull"] and fast > slow:
+        for user_id in users:
+            await _send_sfp_notification(
+                user_id,
+                symbol,
+                "LONG",
+                candle_time,
+                price,
+                fast,
+                slow
+            )
+
+    # Bearish SFP + EMA Fast < EMA Slow = SHORT
+    if result["bear"] and fast < slow:
+        for user_id in users:
+            await _send_sfp_notification(
+                user_id,
+                symbol,
+                "SHORT",
+                candle_time,
+                price,
+                fast,
+                slow
+            )
+
+
+async def sfp_loop():
+    """
+    Favori coinleri Binance USD-M Futures 30m kline WebSocket
+    üzerinden sürekli takip eder.
+
+    Fiyat alarmı WebSocket görevinden tamamen bağımsızdır.
+    """
+
+    reconnect_delay = 3
+    favorite_users: Dict[str, set] = {}
+
+    while True:
+        try:
+            favorite_users = await _load_favorite_users()
+            symbols = set(favorite_users.keys())
+
+            if not symbols:
+                logger.info("SFP takip: Favorilerde izlenecek coin yok.")
+                await asyncio.sleep(15)
+                continue
+
+            logger.info(
+                "SFP takip başlıyor. Favori coin sayısı: %s",
+                len(symbols)
+            )
+
+            # İlk bağlantı öncesi her sembolün geçmiş mumlarını yükle.
+            for symbol in sorted(symbols):
+                if (
+                    symbol not in SFP_BARS
+                    or time.time() - SFP_LAST_BOOTSTRAP.get(symbol, 0)
+                    > SFP_RETRY_SECONDS
+                ):
+                    await _bootstrap_sfp_symbol(symbol)
+
+            streams = "/".join(
+                f"{symbol.lower()}@kline_30m"
+                for symbol in sorted(symbols)
+            )
+
+            ws_url = (
+                "wss://fstream.binance.com/market/stream"
+                f"?streams={streams}"
+            )
+
+            logger.info(
+                "SFP WebSocket bağlanıyor. Semboller: %s",
+                ", ".join(sorted(symbols))
+            )
+
+            async with websockets.connect(
+                ws_url,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=2**20
+            ) as ws:
+
+                logger.info(
+                    "SFP WebSocket bağlandı. Coin sayısı: %s",
+                    len(symbols)
+                )
+
+                last_refresh = time.monotonic()
+
+                while True:
+                    try:
+                        raw_message = await asyncio.wait_for(
+                            ws.recv(),
+                            timeout=5
+                        )
+                    except asyncio.TimeoutError:
+                        raw_message = None
+
+                    if (
+                        time.monotonic() - last_refresh
+                        >= SFP_REFRESH_SECONDS
+                    ):
+                        favorite_users = await _load_favorite_users()
+                        refreshed_symbols = set(favorite_users.keys())
+
+                        if refreshed_symbols != symbols:
+                            logger.info(
+                                "Favori semboller değişti; "
+                                "SFP WebSocket yenilenecek."
+                            )
+                            break
+
+                        last_refresh = time.monotonic()
+
+                    if raw_message is None:
+                        continue
+
+                    try:
+                        message = json.loads(raw_message)
+
+                        if not isinstance(message, dict):
+                            continue
+
+                        data = message.get("data", message)
+
+                        if not isinstance(data, dict):
+                            continue
+
+                        symbol = str(data.get("s", "")).upper()
+                        kline = data.get("k")
+
+                        if (
+                            not symbol
+                            or not isinstance(kline, dict)
+                            or kline.get("i") != SFP_INTERVAL
+                        ):
+                            continue
+
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        logger.warning(
+                            "SFP WebSocket mesajı çözümlenemedi: %s",
+                            str(raw_message)[:300]
+                        )
+                        continue
+
+                    if symbol not in symbols:
+                        continue
+
+                    # Geçmiş verisi henüz alınamadıysa belirli aralıklarla dene.
+                    if (
+                        symbol not in SFP_BARS
+                        and time.time() - SFP_LAST_BOOTSTRAP.get(symbol, 0)
+                        >= SFP_RETRY_SECONDS
+                    ):
+                        await _bootstrap_sfp_symbol(symbol)
+
+                    await _process_sfp_kline(
+                        symbol,
+                        kline,
+                        favorite_users
+                    )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+            logger.warning(
+                "SFP WebSocket bağlantısı koptu/hata oluştu: %s",
+                exc
+            )
+
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
+
+        else:
+            reconnect_delay = 3
+
+
+# ---------------- app setup ----------------
+
 app.include_router(api)
 
 app.add_middleware(
@@ -1039,7 +1648,6 @@ async def startup():
         headers={"User-Agent": "Mozilla/5.0 Epochveras"}
     )
 
-    # Önceden kaydedilmiş Binance REST bekleme süresini geri yükle.
     cooldown_doc = await db.system_state.find_one({
         "_id": "binance_cooldown"
     })
@@ -1059,19 +1667,28 @@ async def startup():
 
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
+
     await db.alarms.create_index([
         ("user_id", 1),
         ("created_at", -1)
     ])
     await db.alarms.create_index("active")
+
     await db.drawings.create_index(
         [("user_id", 1), ("symbol", 1)],
         unique=True
     )
+
     await db.workspaces.create_index("user_id", unique=True)
     await db.push_subs.create_index("endpoint", unique=True)
     await db.push_subs.create_index("user_id")
     await db.login_attempts.create_index("identifier")
+
+    # SFP bildirimlerinde aynı kullanıcı/coin/yön/mum tekrar etmesin.
+    await db.sfp_events.create_index(
+        "event_key",
+        unique=True
+    )
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
 
@@ -1088,14 +1705,25 @@ async def startup():
         })
 
     app.state.alarm_task = asyncio.create_task(alarm_loop())
+    app.state.sfp_task = asyncio.create_task(sfp_loop())
+
+    logger.info("Epochveras alarm ve SFP görevleri başlatıldı.")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    app.state.alarm_task.cancel()
+    tasks = []
 
-    with suppress(asyncio.CancelledError):
-        await app.state.alarm_task
+    for task_name in ("alarm_task", "sfp_task"):
+        task = getattr(app.state, task_name, None)
+
+        if task:
+            task.cancel()
+            tasks.append(task)
+
+    if tasks:
+        with suppress(asyncio.CancelledError):
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     if PUSH_TASKS:
         await asyncio.gather(
