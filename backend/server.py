@@ -1,3 +1,4 @@
+
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -47,7 +48,6 @@ PUSH_TASKS: set = set()
 # ---------------- SFP MONITOR STATE ----------------
 
 SFP_BARS: Dict[str, List[dict]] = {}
-SFP_LAST_BOOTSTRAP: Dict[str, float] = {}
 
 SFP_INTERVAL = "30m"
 SFP_HISTORY_LIMIT = 200
@@ -57,7 +57,6 @@ SFP_EMA_FAST = 38
 SFP_EMA_SLOW = 62
 
 SFP_REFRESH_SECONDS = 10
-SFP_RETRY_SECONDS = 60
 
 
 def now_iso() -> str:
@@ -518,7 +517,6 @@ async def create_alarm(body: AlarmIn, user: dict = Depends(current_user)):
     if not math.isfinite(body.price) or body.price <= 0:
         raise HTTPException(400, "Geçerli bir alarm fiyatı girin.")
 
-    # Yalnızca son 5 saniyede alınan WebSocket fiyatı güvenilir kabul edilir.
     last_price = LAST_PRICES.get(sym)
     last_time = LAST_PRICE_TIMES.get(sym, 0)
 
@@ -793,11 +791,6 @@ async def _load_active_alarms() -> List[dict]:
 
 
 async def alarm_loop():
-    """
-    Binance USD-M Futures trade WebSocket üzerinden
-    yalnızca aktif alarm bulunan sembolleri izler.
-    """
-
     refresh_seconds = 10
     reconnect_delay = 3
 
@@ -1016,15 +1009,10 @@ async def alarm_loop():
 
 
 # ============================================================
-# EPOCH SFP ALERT SYSTEM
+# EPOCH SFP ALERT SYSTEM - WEBSOCKET + MONGODB
 # ============================================================
 
 def sfp_pivot(src: List[float], left: int, right: int, high: bool):
-    """
-    Epoch JS pivot() fonksiyonunun Python karşılığı.
-    Pivot, right bar gecikmesiyle onaylanır.
-    """
-
     out = [None] * len(src)
 
     for i in range(left + right, len(src)):
@@ -1089,20 +1077,6 @@ def ema_last(values: List[float], length: int) -> Optional[float]:
 
 
 def epoch_sfp_conditions(bars: List[dict]) -> dict:
-    """
-    Epoch SFP algoritmasının güncel mumdaki koşullarını hesaplar.
-
-    Bearish:
-        high > swing high
-        open < swing high
-        close < swing high
-
-    Bullish:
-        low < swing low
-        open > swing low
-        close > swing low
-    """
-
     if len(bars) < SFP_SWING_LEN + SFP_RIGHT_BARS + 2:
         return {
             "bull": False,
@@ -1171,70 +1145,119 @@ def epoch_sfp_conditions(bars: List[dict]) -> dict:
     }
 
 
-def _parse_binance_kline(row: list) -> dict:
-    return {
-        "t": int(row[0]),
-        "o": float(row[1]),
-        "h": float(row[2]),
-        "l": float(row[3]),
-        "c": float(row[4])
-    }
+def _parse_ws_kline(kline: dict) -> Optional[dict]:
+    try:
+        bar = {
+            "t": int(kline["t"]),
+            "o": float(kline["o"]),
+            "h": float(kline["h"]),
+            "l": float(kline["l"]),
+            "c": float(kline["c"])
+        }
+
+        values = (
+            bar["o"],
+            bar["h"],
+            bar["l"],
+            bar["c"]
+        )
+
+        if any(
+            not math.isfinite(v) or v <= 0
+            for v in values
+        ):
+            return None
+
+        if bar["h"] < bar["l"]:
+            return None
+
+        return bar
+
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
-async def _bootstrap_sfp_symbol(symbol: str):
+async def _load_sfp_symbol_history(symbol: str) -> int:
     """
-    EMA ve pivot hesaplaması için geçmiş 30m mumlarını yükler.
-
-    Başarısız denemelerde de deneme zamanı kaydedilir.
-    Böylece REST koruması aktifken sürekli tekrar denenmez.
+    SFP geçmişini Binance REST yerine MongoDB'den yükler.
     """
-
-    # Başarılı veya başarısız her denemede zamanı kaydet.
-    # Bu satır 60 saniyelik yeniden deneme aralığını uygular.
-    SFP_LAST_BOOTSTRAP[symbol] = time.time()
 
     try:
-        data = await bget(
-            "/fapi/v1/klines",
-            {
-                "symbol": symbol,
-                "interval": SFP_INTERVAL,
-                "limit": SFP_HISTORY_LIMIT
-            },
-            ttl=5
+        docs = await db.sfp_bars.find(
+            {"symbol": symbol},
+            {"_id": 0, "symbol": 0}
+        ).sort("t", -1).limit(SFP_HISTORY_LIMIT).to_list(
+            SFP_HISTORY_LIMIT
         )
 
-        bars = [
-            _parse_binance_kline(row)
-            for row in data
-            if isinstance(row, list) and len(row) >= 5
-        ]
+        bars = list(reversed(docs))
 
-        if len(bars) < SFP_EMA_SLOW:
-            logger.warning(
-                "SFP geçmiş verisi yetersiz: %s mum=%s",
-                symbol,
-                len(bars)
-            )
-            return False
-
-        SFP_BARS[symbol] = bars[-SFP_HISTORY_LIMIT:]
+        if bars:
+            SFP_BARS[symbol] = bars
 
         logger.info(
-            "SFP geçmiş mumları yüklendi: %s mum=%s",
+            "SFP MongoDB geçmişi yüklendi: %s mum=%s",
             symbol,
-            len(SFP_BARS[symbol])
+            len(bars)
         )
 
-        return True
+        return len(bars)
 
-    except Exception as exc:
-        logger.warning(
-            "SFP geçmiş mumları alınamadı: %s hata=%s",
-            symbol,
-            exc
+    except Exception:
+        logger.exception(
+            "SFP MongoDB geçmişi yüklenemedi: %s",
+            symbol
         )
-        return False
+        return 0
+
+
+async def _save_sfp_closed_bar(symbol: str, bar: dict):
+    """
+    Yalnızca kapanmış mumları MongoDB'ye kaydeder.
+    Canlı mum güncellemeleri MongoDB'ye yazılmaz.
+    """
+
+    try:
+        await db.sfp_bars.update_one(
+            {
+                "symbol": symbol,
+                "t": bar["t"]
+            },
+            {
+                "$set": {
+                    "symbol": symbol,
+                    "t": bar["t"],
+                    "o": bar["o"],
+                    "h": bar["h"],
+                    "l": bar["l"],
+                    "c": bar["c"],
+                    "updated_at": now_iso()
+                }
+            },
+            upsert=True
+        )
+
+        # Her sembol için yalnızca son 200 kapanmış mum tutulur.
+        latest = await db.sfp_bars.find(
+            {"symbol": symbol},
+            {"_id": 0, "t": 1}
+        ).sort("t", -1).limit(SFP_HISTORY_LIMIT).to_list(
+            SFP_HISTORY_LIMIT
+        )
+
+        if len(latest) >= SFP_HISTORY_LIMIT:
+            oldest_kept = latest[-1]["t"]
+
+            await db.sfp_bars.delete_many({
+                "symbol": symbol,
+                "t": {"$lt": oldest_kept}
+            })
+
+    except Exception:
+        logger.exception(
+            "SFP kapanmış mum MongoDB'ye kaydedilemedi: %s",
+            symbol
+        )
 
 
 async def _load_favorite_users() -> Dict[str, set]:
@@ -1290,11 +1313,6 @@ async def _send_sfp_notification(
     ema_fast: float,
     ema_slow: float
 ):
-    """
-    Aynı kullanıcı/coin/yön/mum için tek event kaydı oluşturur.
-    Gönderim başarısızsa sonraki güncellemelerde yeniden deneyebilir.
-    """
-
     event_key = (
         f"{user_id}:{symbol}:{direction}:{candle_time}"
     )
@@ -1396,42 +1414,41 @@ async def _process_sfp_kline(
     favorite_users: Dict[str, set]
 ):
     """
-    Canlı 30m mumunu günceller ve Epoch SFP + EMA şartlarını kontrol eder.
+    WebSocket 30m mumunu işler.
+
+    Devam eden mum bellekte güncellenir.
+    Kapanan mum MongoDB'ye kaydedilir.
     """
 
-    try:
-        candle_time = int(kline["t"])
+    bar = _parse_ws_kline(kline)
 
-        bar = {
-            "t": candle_time,
-            "o": float(kline["o"]),
-            "h": float(kline["h"]),
-            "l": float(kline["l"]),
-            "c": float(kline["c"])
-        }
-
-        if any(
-            not math.isfinite(v) or v <= 0
-            for v in (bar["o"], bar["h"], bar["l"], bar["c"])
-        ):
-            return
-
-    except (KeyError, TypeError, ValueError):
+    if not bar:
         return
 
-    bars = SFP_BARS.get(symbol)
+    bars = SFP_BARS.setdefault(symbol, [])
 
     if not bars:
-        return
+        bars.append(bar)
 
-    if bars[-1]["t"] == candle_time:
+    elif bars[-1]["t"] == bar["t"]:
         bars[-1] = bar
 
-    elif bars[-1]["t"] < candle_time:
+    elif bars[-1]["t"] < bar["t"]:
         bars.append(bar)
         bars[:] = bars[-SFP_HISTORY_LIMIT:]
 
     else:
+        # Eski bir mum mesajı geldiyse geçmişi geriye sarmıyoruz.
+        return
+
+    # Binance kline mesajındaki x alanı mumun kapandığını belirtir.
+    is_closed = bool(kline.get("x", False))
+
+    if is_closed:
+        await _save_sfp_closed_bar(symbol, bar)
+
+    # EMA 62 için yeterli geçmiş yoksa henüz sinyal üretme.
+    if len(bars) < SFP_EMA_SLOW:
         return
 
     users = favorite_users.get(symbol)
@@ -1448,6 +1465,7 @@ async def _process_sfp_kline(
         return
 
     price = bar["c"]
+    candle_time = bar["t"]
 
     # Bullish SFP + EMA Fast > EMA Slow = LONG
     if result["bull"] and fast > slow:
@@ -1479,13 +1497,13 @@ async def _process_sfp_kline(
 async def sfp_loop():
     """
     Favori coinleri Binance USD-M Futures 30m kline WebSocket
-    üzerinden sürekli takip eder.
+    üzerinden takip eder.
 
-    Fiyat alarmı WebSocket görevinden tamamen bağımsızdır.
+    SFP geçmişi yalnızca MongoDB'den yüklenir.
+    Bu görev Binance REST klines isteği yapmaz.
     """
 
     reconnect_delay = 3
-    favorite_users: Dict[str, set] = {}
 
     while True:
         try:
@@ -1502,14 +1520,11 @@ async def sfp_loop():
                 len(symbols)
             )
 
-            # İlk bağlantı öncesi her sembolün geçmiş mumlarını yükle.
+            # Geçmişi MongoDB'den yükle.
+            # Daha önce kaydı olmayan semboller boş başlayacak.
             for symbol in sorted(symbols):
-                if (
-                    symbol not in SFP_BARS
-                    or time.time() - SFP_LAST_BOOTSTRAP.get(symbol, 0)
-                    > SFP_RETRY_SECONDS
-                ):
-                    await _bootstrap_sfp_symbol(symbol)
+                if symbol not in SFP_BARS:
+                    await _load_sfp_symbol_history(symbol)
 
             streams = "/".join(
                 f"{symbol.lower()}@kline_30m"
@@ -1600,14 +1615,6 @@ async def sfp_loop():
                     if symbol not in symbols:
                         continue
 
-                    # Geçmiş verisi henüz alınamadıysa 60 saniyede bir dene.
-                    if (
-                        symbol not in SFP_BARS
-                        and time.time() - SFP_LAST_BOOTSTRAP.get(symbol, 0)
-                        >= SFP_RETRY_SECONDS
-                    ):
-                        await _bootstrap_sfp_symbol(symbol)
-
                     await _process_sfp_kline(
                         symbol,
                         kline,
@@ -1691,6 +1698,12 @@ async def startup():
     # SFP bildirimlerinde aynı kullanıcı/coin/yön/mum tekrar etmesin.
     await db.sfp_events.create_index(
         "event_key",
+        unique=True
+    )
+
+    # SFP kapanmış mumları sembol ve mum zamanına göre saklanır.
+    await db.sfp_bars.create_index(
+        [("symbol", 1), ("t", -1)],
         unique=True
     )
 
