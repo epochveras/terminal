@@ -161,7 +161,7 @@ export default function Terminal() {
     () => readStorage(SECOND_SYMBOL_KEY, "ETHUSDT")
   );
 
-  const [secondTf] = useState(
+  const [secondTf, setSecondTf] = useState(
     () => readStorage(SECOND_TF_KEY, "15m")
   );
 
@@ -179,6 +179,21 @@ export default function Terminal() {
 
   const mainActive = activeChart === "main";
   const secondActive = activeChart === "second";
+
+  // Üstteki zaman dilimi butonları aktif grafiği değiştirir.
+  const activeTf =
+    twoCharts && secondActive ? secondTf : tf;
+
+  const setActiveTf = useCallback(
+    (key) => {
+      if (twoCharts && activeChart === "second") {
+        setSecondTf(key);
+      } else {
+        update({ tf: key });
+      }
+    },
+    [twoCharts, activeChart, update]
+  );
 
   const activeEngine = useCallback(() => {
     if (
@@ -701,8 +716,8 @@ export default function Terminal() {
     >
       <TopBar
         symbol={symbol}
-        tf={tf}
-        setTf={(key) => update({ tf: key })}
+        tf={activeTf}
+        setTf={setActiveTf}
         onSearch={() => setSearch(true)}
         settings={settings}
         toggleInd={(key, enabled) =>
