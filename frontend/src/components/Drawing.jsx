@@ -1,4 +1,9 @@
-import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square } from "lucide-react";
+
+
+
+
+
+import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square, Type } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 
 const PosIcon = ({ long }) => (
@@ -12,8 +17,8 @@ export const STYLED = ["trendline", "hray", "vline", "rect", "fib"];
 const TOOLS = [
   ["cursor", "İmleç", <MousePointer2 size={18} />], ["trendline", "Trend çizgisi", <Slash size={18} />],
   ["hray", "Yatay ışın", <MoveRight size={18} />], ["vline", "Dikey çizgi", <VIcon />],
-  ["rect", "Dikdörtgen", <Square size={17} />], ["fib", "Fibonacci düzeltme", <FibIcon />], ["long", "Uzun pozisyon", <PosIcon long />],
-  ["short", "Kısa pozisyon", <PosIcon />], ["ruler", "Cetvel", <Ruler size={18} />],
+  ["rect", "Dikdörtgen", <Square size={17} />], ["fib", "Fibonacci düzeltme", <FibIcon />], ["text", "Metin ekle", <Type size={18} />],
+  ["long", "Uzun pozisyon", <PosIcon long />], ["short", "Kısa pozisyon", <PosIcon />], ["ruler", "Cetvel", <Ruler size={18} />],
 ];
 
 const Btn = ({ id, label, active, onClick, children }) => (
@@ -40,21 +45,33 @@ const SWATCHES = ["#2962ff", "#00bcd4", "#089981", "#00e676", "#ffeb3b", "#ff980
 export function DrawingProps({ sel, onChange, onDelete }) {
   if (!sel) return null;
   const styled = STYLED.includes(sel.type);
+  const isText = sel.type === "text";
   return (
     <div data-testid="drawing-props-bar" className="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-[#131722] border border-[#2a2e39] rounded-md px-2 py-1 shadow-xl max-w-[95%] overflow-x-auto ev-noscroll">
       <button data-testid="drawing-delete-button" onClick={onDelete} className="w-8 h-7 shrink-0 flex items-center justify-center rounded text-[#f23645] hover:bg-[#1e222d]"><Trash2 size={15} /></button>
-      {styled && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
+      {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
       {styled && [1, 2, 3, 4].map((w) => (
         <button key={w} data-testid={`drawing-width-${w}`} onClick={() => onChange({ width: w })} className={`w-8 h-7 shrink-0 flex items-center justify-center rounded ${sel.width === w ? "bg-[#2a2e39]" : "hover:bg-[#1e222d]"}`}>
           <span className="block w-5 bg-[#d1d4dc]" style={{ height: w }} />
         </button>
       ))}
-      {styled && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
-      {styled && SWATCHES.map((c) => (
+      {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
+      {(styled || isText) && SWATCHES.map((c) => (
         <button key={c} data-testid={`drawing-color-${c.slice(1)}`} onClick={() => onChange({ color: c })} className={`w-6 h-6 md:w-5 md:h-5 rounded-sm shrink-0 border ${sel.color === c ? "border-white" : "border-transparent"}`} style={{ background: c }} />
       ))}
-      {styled && <input type="color" data-testid="drawing-color-custom" value={sel.color} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 bg-transparent shrink-0" />}
-      {!styled && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
+      {(styled || isText) && <input type="color" data-testid="drawing-color-custom" value={sel.color || "#d1d4dc"} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 bg-transparent shrink-0" />}
+      {isText && <>
+        <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
+        {[12, 14, 16, 20, 24, 30].map((size) => (
+          <button key={size} data-testid={`drawing-font-size-${size}`} onClick={() => onChange({ fontSize: size })} className={`h-7 px-2 shrink-0 rounded text-xs ${Number(sel.fontSize || 14) === size ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>{size}</button>
+        ))}
+      </>}
+      {!styled && !isText && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
     </div>
   );
 }
+
+
+
+
+
