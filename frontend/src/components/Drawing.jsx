@@ -1,3 +1,10 @@
+
+
+
+
+
+
+
 import { useState } from "react";
 import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square, Type } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
@@ -53,6 +60,7 @@ function readFibPreferences() {
 }
 export function DrawingProps({ sel, onChange, onDelete }) {
   const [fibLevelsOpen, setFibLevelsOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState(null);
   const [fibPreferences, setFibPreferences] = useState(readFibPreferences);
   const saveFibPreferences = (patch) => {
     const next = { ...fibPreferences, ...patch };
@@ -70,28 +78,67 @@ export function DrawingProps({ sel, onChange, onDelete }) {
     onChange({ levels: next });
     saveFibPreferences({ levels: next });
   };
+  const menuButton = "h-7 px-2 shrink-0 inline-flex items-center gap-1 rounded text-xs text-[#b2b5be] hover:bg-[#1e222d] hover:text-white";
+  const menuPanel = "absolute top-full left-0 mt-1 z-[60] rounded-md border border-[#2a2e39] bg-[#131722] p-2 shadow-2xl";
 
   return (
     <div data-testid="drawing-props-bar" className="absolute top-2 left-1/2 -translate-x-1/2 z-20 max-w-[95%]">
-      <div className="flex items-center gap-1 bg-[#131722] border border-[#2a2e39] rounded-md px-2 py-1 shadow-xl max-w-full overflow-x-auto ev-noscroll">
+      <div className="flex flex-wrap items-center gap-1 bg-[#131722] border border-[#2a2e39] rounded-md px-2 py-1 shadow-xl max-w-full">
         <button data-testid="drawing-delete-button" onClick={onDelete} className="w-8 h-7 shrink-0 flex items-center justify-center rounded text-[#f23645] hover:bg-[#1e222d]"><Trash2 size={15} /></button>
+
         {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
-        {styled && [1, 2, 3, 4].map((w) => (
-          <button key={w} data-testid={`drawing-width-${w}`} onClick={() => onChange({ width: w })} className={`w-8 h-7 shrink-0 flex items-center justify-center rounded ${sel.width === w ? "bg-[#2a2e39]" : "hover:bg-[#1e222d]"}`}>
-            <span className="block w-5 bg-[#d1d4dc]" style={{ height: w }} />
-          </button>
-        ))}
-        {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
-        {(styled || isText) && SWATCHES.map((c) => (
-          <button key={c} data-testid={`drawing-color-${c.slice(1)}`} onClick={() => onChange({ color: c })} className={`w-6 h-6 md:w-5 md:h-5 rounded-sm shrink-0 border ${sel.color === c ? "border-white" : "border-transparent"}`} style={{ background: c }} />
-        ))}
-        {(styled || isText) && <input type="color" data-testid="drawing-color-custom" value={sel.color || "#d1d4dc"} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 bg-transparent shrink-0" />}
+
+        {(styled || isText) && (
+          <div className="relative shrink-0">
+            <button type="button" data-testid="drawing-width-menu" aria-expanded={openMenu === "width"}
+              onClick={() => setOpenMenu((v) => v === "width" ? null : "width")} className={`${menuButton} ${openMenu === "width" ? "bg-[#2a2e39] text-white" : ""}`}>
+              <span className="inline-block w-5 bg-[#d1d4dc]" style={{ height: Math.max(1, Number(sel.width) || 1) }} />
+              <span>Kalınlık</span><span className="text-[10px]">▾</span>
+            </button>
+            {openMenu === "width" && (
+              <div data-testid="drawing-width-menu-panel" className={`${menuPanel} w-28`}>
+                {[1, 2, 3, 4].map((w) => (
+                  <button key={w} data-testid={`drawing-width-${w}`} onClick={() => { onChange({ width: w }); setOpenMenu(null); }}
+                    className={`w-full h-8 px-2 flex items-center justify-between rounded ${Number(sel.width || 1) === w ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>
+                    <span className="text-xs">{w} px</span><span className="block w-8 bg-[#d1d4dc]" style={{ height: w }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {(styled || isText) && (
+          <div className="relative shrink-0">
+            <button type="button" data-testid="drawing-color-menu" aria-expanded={openMenu === "color"}
+              onClick={() => setOpenMenu((v) => v === "color" ? null : "color")} className={`${menuButton} ${openMenu === "color" ? "bg-[#2a2e39] text-white" : ""}`}>
+              <span className="w-4 h-4 rounded-sm border border-white/30" style={{ background: sel.color || "#d1d4dc" }} />
+              <span>Renk</span><span className="text-[10px]">▾</span>
+            </button>
+            {openMenu === "color" && (
+              <div data-testid="drawing-color-menu-panel" className={`${menuPanel} w-40`}>
+                <div className="grid grid-cols-5 gap-2">
+                  {SWATCHES.map((c) => (
+                    <button key={c} data-testid={`drawing-color-${c.slice(1)}`} aria-label={`Renk ${c}`} onClick={() => { onChange({ color: c }); setOpenMenu(null); }}
+                      className={`w-6 h-6 rounded-sm border ${sel.color === c ? "border-white ring-1 ring-white/50" : "border-[#414653]"}`} style={{ background: c }} />
+                  ))}
+                </div>
+                <div className="flex items-center justify-between gap-2 mt-3 pt-2 border-t border-[#2a2e39]">
+                  <span className="text-xs text-[#b2b5be]">Özel renk</span>
+                  <input type="color" data-testid="drawing-color-custom" value={sel.color || "#d1d4dc"} onChange={(e) => onChange({ color: e.target.value })} className="w-8 h-7 bg-transparent cursor-pointer" />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {isText && <>
           <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
           {[12, 14, 16, 20, 24, 30].map((size) => (
             <button key={size} data-testid={`drawing-font-size-${size}`} onClick={() => onChange({ fontSize: size })} className={`h-7 px-2 shrink-0 rounded text-xs ${Number(sel.fontSize || 14) === size ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>{size}</button>
           ))}
         </>}
+
         {sel.type === "fib" && <>
           <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
           <button data-testid="fib-reverse" onClick={() => { const reverse = !sel.reverse; onChange({ reverse }); saveFibPreferences({ reverse }); }} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
@@ -107,7 +154,7 @@ export function DrawingProps({ sel, onChange, onDelete }) {
       </div>
 
       {sel.type === "fib" && fibLevelsOpen && (
-        <div data-testid="fib-levels-panel" className="absolute top-full right-0 mt-1 z-50 w-60 max-h-80 overflow-y-auto rounded-md border border-[#2a2e39] bg-[#131722] p-3 shadow-2xl">
+        <div data-testid="fib-levels-panel" className="absolute top-full right-0 mt-1 z-[70] w-60 max-h-80 overflow-y-auto rounded-md border border-[#2a2e39] bg-[#131722] p-3 shadow-2xl">
           <div className="text-xs font-medium text-white mb-2">Fibonacci oranları</div>
           {levels.map((level, index) => (
             <div key={`${level.value}-${index}`} className="flex items-center gap-2 py-1.5">
@@ -122,7 +169,4 @@ export function DrawingProps({ sel, onChange, onDelete }) {
     </div>
   );
 }
-
-
-
 
