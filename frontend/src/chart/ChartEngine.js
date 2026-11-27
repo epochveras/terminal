@@ -11,6 +11,10 @@ const FONT = "12px " + FAM;
 const TZ = 3 * 3600e3;
 const TWO = ["trendline", "rect", "fib"];
 const FIB = [[0, "#787b86"], [0.236, "#f23645"], [0.382, "#ff9800"], [0.5, "#4caf50"], [0.618, "#089981"], [0.786, "#00bcd4"], [1, "#787b86"], [1.618, "#2962ff"]];
+const fibDefaults = () => FIB.map(([value, color]) => ({ value, color, visible: true }));
+const fibLevels = (d) => Array.isArray(d.levels) && d.levels.length
+  ? d.levels.filter((x) => Number.isFinite(Number(x.value))).slice().sort((a, b) => Number(a.value) - Number(b.value))
+  : fibDefaults();
 const DEF_STYLE = { color: "#d1d4dc", width: 1 };
 const MONTHS = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
 const TICK_INTERVALS = [60e3, 300e3, 900e3, 1800e3, 3600e3, 7200e3, 10800e3, 14400e3, 21600e3, 43200e3, 864e5, 1728e5, 6048e5, "M", "3M", "Y"];
@@ -408,14 +412,23 @@ export class ChartEngine {
       if (sel) { this.handle(a.x, a.y, d.color); this.handle(b.x, b.y, d.color); this.handle(a.x, b.y, d.color); this.handle(b.x, a.y, d.color); }
     } else if (d.type === "fib") {
       const a = this.pt(d.p1), b = this.pt(d.p2), x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x), rng = d.p2.p - d.p1.p;
-      ctx.strokeStyle = d.color; ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
-      let prevY = null;
-      FIB.forEach(([lv, col]) => {
-        const price = d.p2.p - rng * lv, y = this.yOf(price);
-        if (prevY != null) { ctx.fillStyle = col + "1a"; ctx.fillRect(x1, Math.min(prevY, y), x2 - x1, Math.abs(y - prevY)); }
-        ctx.strokeStyle = col; ctx.lineWidth = d.width; ctx.beginPath(); ctx.moveTo(x1, Math.round(y) + 0.5); ctx.lineTo(x2, Math.round(y) + 0.5); ctx.stroke();
-        ctx.fillStyle = col; ctx.font = "11px " + FAM; ctx.textAlign = "right"; ctx.textBaseline = "middle";
-        ctx.fillText(`${lv} (${fmtPrice(price, this.dec)})`, x1 - 4, y); prevY = y;
+      ctx.strokeStyle = d.color || "#d1d4dc"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+      const levels = fibLevels(d).filter((level) => level.visible !== false).map((level) => {
+        const lv = Number(level.value), price = d.reverse ? d.p1.p + rng * lv : d.p2.p - rng * lv;
+        return { ...level, value: lv, price, y: this.yOf(price), color: level.color || "#d1d4dc" };
+      });
+      if (d.showFill !== false) {
+        for (let i = 1; i < levels.length; i++) {
+          const prev = levels[i - 1], cur = levels[i];
+          ctx.fillStyle = cur.color + "1a";
+          ctx.fillRect(x1, Math.min(prev.y, cur.y), x2 - x1, Math.abs(cur.y - prev.y));
+        }
+      }
+      levels.forEach((level) => {
+        const { value: lv, price, y, color } = level;
+        ctx.strokeStyle = color; ctx.lineWidth = Number(d.width) || 1; ctx.beginPath(); ctx.moveTo(x1, Math.round(y) + 0.5); ctx.lineTo(x2, Math.round(y) + 0.5); ctx.stroke();
+        ctx.fillStyle = color; ctx.font = "11px " + FAM; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+        ctx.fillText(`${lv} (${fmtPrice(price, this.dec)})`, x1 - 4, y);
       });
       if (sel) { this.handle(a.x, a.y, d.color); this.handle(b.x, b.y, d.color); }
     } else if (d.type === "text") {
@@ -632,7 +645,7 @@ export class ChartEngine {
         }
         const inX = x >= Math.min(a.x, b.x) - tol && x <= Math.max(a.x, b.x) + tol;
         if (d.type === "rect" && inX && y >= Math.min(a.y, b.y) - tol && y <= Math.max(a.y, b.y) + tol) return { d, h: null };
-        if (d.type === "fib" && inX && FIB.some(([lv]) => Math.abs(y - this.yOf(d.p2.p - (d.p2.p - d.p1.p) * lv)) < tol)) return { d, h: null };
+        if (d.type === "fib" && inX && fibLevels(d).some((level) => level.visible !== false && Math.abs(y - this.yOf(d.reverse ? d.p1.p + (d.p2.p - d.p1.p) * Number(level.value) : d.p2.p - (d.p2.p - d.p1.p) * Number(level.value))) < tol)) return { d, h: null };
       } else if (d.type === "text") {
         const a = this.pt(d.p1), size = Math.max(8, Math.min(48, Number(d.fontSize) || 14));
         const ctx = this.ctx; ctx.save(); ctx.font = `${size}px ${FAM}`;
@@ -711,7 +724,7 @@ export class ChartEngine {
       }
       this.tool = "cursor"; this.cb.onToolDone?.(); this.mode = { k: "none" }; this.dirty(); return;
     }
-    if (TWO.includes(t)) this.creating = { k: "drag", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t] }, x0: p.x, y0: p.y };
+    if (TWO.includes(t)) this.creating = { k: "drag", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? { levels: fibDefaults(), showFill: true, reverse: false } : {}) }, x0: p.x, y0: p.y };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "drag", ruler: true, x0: p.x, y0: p.y }; }
     else if (t === "hray" || t === "vline") { this.creating = { k: "drag", one: true, d: { id: uid(), type: t, p1: pt, ...DEF_STYLE, ...this.defaults[t] } }; }
     else if (t === "long" || t === "short") {
@@ -734,7 +747,7 @@ export class ChartEngine {
     const p = this.aimPos(fp), pt = this.point(p.x, p.y), t = this.tool;
     if (this.creating?.k === "await") return this.finishCreate(pt);
     if (t === "text") { this.startCreate(p, true); this.mode = null; return; }
-    if (TWO.includes(t)) this.creating = { k: "await", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t] } };
+    if (TWO.includes(t)) this.creating = { k: "await", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? { levels: fibDefaults(), showFill: true, reverse: false } : {}) } };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "await", ruler: true }; }
     else {
       this.startCreate(p, true); this.mode = null; this.finishCreate(null);
