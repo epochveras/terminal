@@ -1,9 +1,3 @@
-
-
-
-
-
-
 import { useState } from "react";
 import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square, Type } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
@@ -44,18 +38,37 @@ export function DrawingToolbar({ tool, setTool, magnet, setMagnet, onClear }) {
 }
 
 const SWATCHES = ["#2962ff", "#00bcd4", "#089981", "#00e676", "#ffeb3b", "#ff9800", "#f23645", "#e040fb", "#ffffff", "#787b86"];
+const FIB_PREF_KEY = "epochveras_fib_preferences_v1";
+const DEFAULT_FIB_LEVELS = [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value, color]) => ({ value, color, visible: true }));
+function readFibPreferences() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(FIB_PREF_KEY) || "null");
+    if (!saved || typeof saved !== "object") return { levels: DEFAULT_FIB_LEVELS, showFill: true, reverse: false };
+    return {
+      levels: Array.isArray(saved.levels) && saved.levels.length ? saved.levels : DEFAULT_FIB_LEVELS,
+      showFill: saved.showFill !== false,
+      reverse: saved.reverse === true,
+    };
+  } catch (_) { return { levels: DEFAULT_FIB_LEVELS, showFill: true, reverse: false }; }
+}
 export function DrawingProps({ sel, onChange, onDelete }) {
   const [fibLevelsOpen, setFibLevelsOpen] = useState(false);
+  const [fibPreferences, setFibPreferences] = useState(readFibPreferences);
+  const saveFibPreferences = (patch) => {
+    const next = { ...fibPreferences, ...patch };
+    setFibPreferences(next);
+    try { window.localStorage.setItem(FIB_PREF_KEY, JSON.stringify(next)); } catch (_) {}
+  };
   if (!sel) return null;
   const styled = STYLED.includes(sel.type);
   const isText = sel.type === "text";
-  const defaultLevels = [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]];
   const levels = Array.isArray(sel.levels) && sel.levels.length
     ? sel.levels
-    : defaultLevels.map(([value, color]) => ({ value, color, visible: true }));
+    : fibPreferences.levels;
   const updateLevel = (index, patch) => {
     const next = levels.map((item, i) => i === index ? { ...item, ...patch } : item);
     onChange({ levels: next });
+    saveFibPreferences({ levels: next });
   };
 
   return (
@@ -81,9 +94,9 @@ export function DrawingProps({ sel, onChange, onDelete }) {
         </>}
         {sel.type === "fib" && <>
           <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
-          <button data-testid="fib-reverse" onClick={() => onChange({ reverse: !sel.reverse })} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
+          <button data-testid="fib-reverse" onClick={() => { const reverse = !sel.reverse; onChange({ reverse }); saveFibPreferences({ reverse }); }} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
           <label className="flex items-center gap-1 text-xs text-[#b2b5be] shrink-0 px-1">
-            <input data-testid="fib-fill-toggle" type="checkbox" checked={sel.showFill !== false} onChange={(e) => onChange({ showFill: e.target.checked })} />
+            <input data-testid="fib-fill-toggle" type="checkbox" checked={sel.showFill !== false} onChange={(e) => { const showFill = e.target.checked; onChange({ showFill }); saveFibPreferences({ showFill }); }} />
             Arka plan
           </label>
           <button type="button" data-testid="fib-levels-settings" aria-expanded={fibLevelsOpen} onClick={() => setFibLevelsOpen((open) => !open)} className={`h-7 px-2 shrink-0 rounded text-xs ${fibLevelsOpen ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>
