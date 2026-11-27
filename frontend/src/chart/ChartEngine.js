@@ -418,6 +418,19 @@ export class ChartEngine {
         ctx.fillText(`${lv} (${fmtPrice(price, this.dec)})`, x1 - 4, y); prevY = y;
       });
       if (sel) { this.handle(a.x, a.y, d.color); this.handle(b.x, b.y, d.color); }
+    } else if (d.type === "text") {
+      const a = this.pt(d.p1);
+      const size = Math.max(8, Math.min(48, Number(d.fontSize) || 14));
+      ctx.font = `${size}px ${FAM}`;
+      ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillStyle = d.color || "#d1d4dc";
+      ctx.fillText(String(d.text || ""), a.x, a.y);
+      if (sel) {
+        const w = ctx.measureText(String(d.text || "")).width;
+        ctx.strokeStyle = d.color || "#d1d4dc"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.strokeRect(a.x - 3, a.y - size / 2 - 3, w + 6, size + 6); ctx.setLineDash([]);
+        this.handle(a.x, a.y, d.color || "#d1d4dc");
+      }
     } else if (d.type === "long" || d.type === "short") this.drawPosition(d, sel);
   }
   drawPosition(d, sel) {
@@ -620,6 +633,11 @@ export class ChartEngine {
         const inX = x >= Math.min(a.x, b.x) - tol && x <= Math.max(a.x, b.x) + tol;
         if (d.type === "rect" && inX && y >= Math.min(a.y, b.y) - tol && y <= Math.max(a.y, b.y) + tol) return { d, h: null };
         if (d.type === "fib" && inX && FIB.some(([lv]) => Math.abs(y - this.yOf(d.p2.p - (d.p2.p - d.p1.p) * lv)) < tol)) return { d, h: null };
+      } else if (d.type === "text") {
+        const a = this.pt(d.p1), size = Math.max(8, Math.min(48, Number(d.fontSize) || 14));
+        const ctx = this.ctx; ctx.save(); ctx.font = `${size}px ${FAM}`;
+        const w = ctx.measureText(String(d.text || "")).width; ctx.restore();
+        if (x >= a.x - tol && x <= a.x + w + tol && y >= a.y - size / 2 - tol && y <= a.y + size / 2 + tol) return { d, h: null };
       } else if (d.type === "long" || d.type === "short") {
         const x1 = this.xOfT(d.t1), x2 = this.xOfT(d.t2), yE = this.yOf(d.entry), yT = this.yOf(d.tp), yS = this.yOf(d.sl);
         for (const [h, hx, hy] of [["entry", x1, yE], ["tp", x1, yT], ["sl", x1, yS], ["right", x2, yE]]) if (Math.hypot(x - hx, y - hy) < tol + 3) return { d, h };
@@ -685,6 +703,14 @@ export class ChartEngine {
   startCreate(p, touch) {
     const pt = this.point(p.x, p.y), t = this.tool;
     if (this.creating && this.creating.k === "await") { this.finishCreate(pt); this.mode = { k: "none" }; return; }
+    if (t === "text") {
+      const value = window.prompt("Grafiğe eklenecek metni yazın:", "");
+      if (value != null && value.trim()) {
+        const d = { id: uid(), type: "text", p1: pt, text: value.trim(), color: "#d1d4dc", fontSize: 14 };
+        this.drawings.push(d); this.emitDrawings(); this.select(d);
+      }
+      this.tool = "cursor"; this.cb.onToolDone?.(); this.mode = { k: "none" }; this.dirty(); return;
+    }
     if (TWO.includes(t)) this.creating = { k: "drag", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t] }, x0: p.x, y0: p.y };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "drag", ruler: true, x0: p.x, y0: p.y }; }
     else if (t === "hray" || t === "vline") { this.creating = { k: "drag", one: true, d: { id: uid(), type: t, p1: pt, ...DEF_STYLE, ...this.defaults[t] } }; }
@@ -707,6 +733,7 @@ export class ChartEngine {
   aimPlace(fp) {
     const p = this.aimPos(fp), pt = this.point(p.x, p.y), t = this.tool;
     if (this.creating?.k === "await") return this.finishCreate(pt);
+    if (t === "text") { this.startCreate(p, true); this.mode = null; return; }
     if (TWO.includes(t)) this.creating = { k: "await", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t] } };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "await", ruler: true }; }
     else {
@@ -817,7 +844,23 @@ export class ChartEngine {
   }
   on_pointercancel(e) { this.pointers.delete(e.pointerId); this.mode = null; clearTimeout(this.lp); }
   on_pointerleave(e) { if (e.pointerType === "mouse" && !this.mode) { this.cross = null; this.dirty(); } }
-  on_dblclick(e) { const p = this.pos(e); const r = this.region(p.x, p.y); if (r === "paxis" || r === "taxis") { this.auto = true; this.dirty(); } if (r === "raxis") { this.rAuto = true; this.dirty(); } }
+  on_dblclick(e) {
+    const p = this.pos(e), r = this.region(p.x, p.y);
+    if (r === "main") {
+      const hit = this.hitTest(p.x, p.y, false);
+      if (hit?.d?.type === "text") {
+        const value = window.prompt("Metni düzenle:", hit.d.text || "");
+        if (value != null) {
+          if (value.trim()) hit.d.text = value.trim();
+          else this.drawings = this.drawings.filter((d) => d !== hit.d);
+          this.select(value.trim() ? hit.d : null); this.emitDrawings(); this.dirty();
+        }
+        return;
+      }
+    }
+    if (r === "paxis" || r === "taxis") { this.auto = true; this.dirty(); }
+    if (r === "raxis") { this.rAuto = true; this.dirty(); }
+  }
   on_wheel(e) {
     e.preventDefault(); const p = this.pos(e);
     if (this.region(p.x, p.y) === "raxis" && this.hasRsi) {
