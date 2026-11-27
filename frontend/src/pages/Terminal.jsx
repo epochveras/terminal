@@ -1,3 +1,4 @@
+
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { List, Bell, Activity, X, Pencil, ChevronUp, ChevronDown } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -88,7 +89,6 @@ export default function Terminal() {
   const [live, setLive] = useState(false);
   const [sheet, setSheet] = useState(null);
 
-  // Çizim paneli tercihi ortak workspace üzerinden yönetilir.
   const drawingOpen = settings.drawingOpen ?? true;
 
   const engine = useRef(null);
@@ -203,20 +203,55 @@ export default function Terminal() {
 
   const meta = metaMap[symbol];
 
-  // Mobil hızlı coin seçici, varsayılan favori grubunun sırasını kullanır.
-  // Seçili coin favorilerde değilse mevcut coin de listede tutulur.
+  // Mobil coin listesi:
+  // Önce bütün favori gruplarını alır.
+  // Ardından eksik kalan kripto sembollerini ekler.
+  // Aynı sembol ikinci kez eklenmez.
   const mobileFavoriteSymbols = useMemo(() => {
-    const favoriteGroup = favorites.find((g) => g.id === "fav");
     const bySymbol = new Map(
       symbolList.map((item) => [item.symbol, item])
     );
 
-    const list = (favoriteGroup?.symbols || [])
-      .map((item) => bySymbol.get(item))
-      .filter(Boolean);
+    const list = [];
+    const seen = new Set();
 
-    if (!list.some((item) => item.symbol === symbol)) {
-      list.unshift(metaMap[symbol]);
+    const addSymbol = (value) => {
+      const name =
+        typeof value === "string"
+          ? value
+          : value?.symbol;
+
+      if (!name || seen.has(name)) return;
+
+      const item = bySymbol.get(name);
+
+      if (!item || item.type === "COMMODITY") return;
+
+      seen.add(name);
+      list.push(item);
+    };
+
+    // Bütün favori gruplarını dolaş.
+    (Array.isArray(favorites) ? favorites : []).forEach((group) => {
+      (Array.isArray(group?.symbols) ? group.symbols : []).forEach(
+        addSymbol
+      );
+    });
+
+    // Favorilerdeki coinlerden sonra diğer kripto sembollerini ekle.
+    symbolList.forEach((item) => {
+      if (item.type !== "COMMODITY") {
+        addSymbol(item.symbol);
+      }
+    });
+
+    // Seçili sembol listede yoksa kaybetme.
+    if (!seen.has(symbol)) {
+      const current = bySymbol.get(symbol) || metaMap[symbol];
+
+      if (current) {
+        list.unshift(current);
+      }
     }
 
     return list;
@@ -234,42 +269,53 @@ export default function Terminal() {
     [update]
   );
 
+  // direction: 1 sonraki, -1 önceki coin.
   const changeMobileFavorite = useCallback(
     (direction) => {
-      if (mobileFavoriteSymbols.length < 2) return;
+      const list = mobileFavoriteSymbols;
 
-      const currentIndex = mobileFavoriteSymbols.findIndex(
+      if (list.length < 2) return;
+
+      const currentIndex = list.findIndex(
         (item) => item.symbol === symbol
       );
 
       const index = currentIndex < 0 ? 0 : currentIndex;
-      const nextIndex =
-        (index + direction + mobileFavoriteSymbols.length) %
-        mobileFavoriteSymbols.length;
 
-      selectSymbol(mobileFavoriteSymbols[nextIndex].symbol);
+      const nextIndex =
+        (index + direction + list.length) % list.length;
+
+      const nextSymbol = list[nextIndex]?.symbol;
+
+      if (nextSymbol && nextSymbol !== symbol) {
+        selectSymbol(nextSymbol);
+      }
     },
     [mobileFavoriteSymbols, symbol, selectSymbol]
   );
 
   const handleMobileCoinTouchStart = (e) => {
-    mobileSwipeStart.current = e.touches?.[0]?.clientY ?? null;
+    e.stopPropagation();
+
+    mobileSwipeStart.current =
+      e.touches?.[0]?.clientY ?? null;
   };
 
   const handleMobileCoinTouchEnd = (e) => {
+    e.stopPropagation();
+
     const startY = mobileSwipeStart.current;
     mobileSwipeStart.current = null;
 
     if (startY == null || !e.changedTouches?.length) return;
 
-    const deltaY = e.changedTouches[0].clientY - startY;
+    const deltaY =
+      e.changedTouches[0].clientY - startY;
 
-    if (Math.abs(deltaY) < 28) return;
+    if (Math.abs(deltaY) < 20) return;
 
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Yukarı kaydırma sonraki, aşağı kaydırma önceki favoriye geçer.
+    // Yukarı kaydırma: sonraki coin.
+    // Aşağı kaydırma: önceki coin.
     changeMobileFavorite(deltaY < 0 ? 1 : -1);
   };
 
@@ -498,7 +544,8 @@ export default function Terminal() {
               {mobile && mobileFavoriteSymbols.length > 0 && (
                 <div
                   data-testid="mobile-favorite-switcher"
-                  className="absolute top-2 left-2 z-30 flex items-center gap-1 rounded-md border border-[#363b49] bg-[#131722]/95 px-1.5 py-1 shadow-xl select-none"
+                  className="absolute bottom-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 rounded-md border border-[#363b49] bg-[#131722]/95 px-1.5 py-1 shadow-xl select-none"
+                  style={{ touchAction: "none" }}
                   onTouchStart={handleMobileCoinTouchStart}
                   onTouchEnd={handleMobileCoinTouchEnd}
                   onTouchCancel={() => {
