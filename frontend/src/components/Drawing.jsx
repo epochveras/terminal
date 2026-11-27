@@ -1,3 +1,10 @@
+
+
+
+
+
+
+import { useState } from "react";
 import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square, Type } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 
@@ -38,56 +45,67 @@ export function DrawingToolbar({ tool, setTool, magnet, setMagnet, onClear }) {
 
 const SWATCHES = ["#2962ff", "#00bcd4", "#089981", "#00e676", "#ffeb3b", "#ff9800", "#f23645", "#e040fb", "#ffffff", "#787b86"];
 export function DrawingProps({ sel, onChange, onDelete }) {
+  const [fibLevelsOpen, setFibLevelsOpen] = useState(false);
   if (!sel) return null;
   const styled = STYLED.includes(sel.type);
   const isText = sel.type === "text";
+  const defaultLevels = [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]];
+  const levels = Array.isArray(sel.levels) && sel.levels.length
+    ? sel.levels
+    : defaultLevels.map(([value, color]) => ({ value, color, visible: true }));
+  const updateLevel = (index, patch) => {
+    const next = levels.map((item, i) => i === index ? { ...item, ...patch } : item);
+    onChange({ levels: next });
+  };
+
   return (
-    <div data-testid="drawing-props-bar" className="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-[#131722] border border-[#2a2e39] rounded-md px-2 py-1 shadow-xl max-w-[95%] overflow-x-auto ev-noscroll">
-      <button data-testid="drawing-delete-button" onClick={onDelete} className="w-8 h-7 shrink-0 flex items-center justify-center rounded text-[#f23645] hover:bg-[#1e222d]"><Trash2 size={15} /></button>
-      {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
-      {styled && [1, 2, 3, 4].map((w) => (
-        <button key={w} data-testid={`drawing-width-${w}`} onClick={() => onChange({ width: w })} className={`w-8 h-7 shrink-0 flex items-center justify-center rounded ${sel.width === w ? "bg-[#2a2e39]" : "hover:bg-[#1e222d]"}`}>
-          <span className="block w-5 bg-[#d1d4dc]" style={{ height: w }} />
-        </button>
-      ))}
-      {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
-      {(styled || isText) && SWATCHES.map((c) => (
-        <button key={c} data-testid={`drawing-color-${c.slice(1)}`} onClick={() => onChange({ color: c })} className={`w-6 h-6 md:w-5 md:h-5 rounded-sm shrink-0 border ${sel.color === c ? "border-white" : "border-transparent"}`} style={{ background: c }} />
-      ))}
-      {(styled || isText) && <input type="color" data-testid="drawing-color-custom" value={sel.color || "#d1d4dc"} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 bg-transparent shrink-0" />}
-      {isText && <>
-        <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
-        {[12, 14, 16, 20, 24, 30].map((size) => (
-          <button key={size} data-testid={`drawing-font-size-${size}`} onClick={() => onChange({ fontSize: size })} className={`h-7 px-2 shrink-0 rounded text-xs ${Number(sel.fontSize || 14) === size ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>{size}</button>
+    <div data-testid="drawing-props-bar" className="absolute top-2 left-1/2 -translate-x-1/2 z-20 max-w-[95%]">
+      <div className="flex items-center gap-1 bg-[#131722] border border-[#2a2e39] rounded-md px-2 py-1 shadow-xl max-w-full overflow-x-auto ev-noscroll">
+        <button data-testid="drawing-delete-button" onClick={onDelete} className="w-8 h-7 shrink-0 flex items-center justify-center rounded text-[#f23645] hover:bg-[#1e222d]"><Trash2 size={15} /></button>
+        {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
+        {styled && [1, 2, 3, 4].map((w) => (
+          <button key={w} data-testid={`drawing-width-${w}`} onClick={() => onChange({ width: w })} className={`w-8 h-7 shrink-0 flex items-center justify-center rounded ${sel.width === w ? "bg-[#2a2e39]" : "hover:bg-[#1e222d]"}`}>
+            <span className="block w-5 bg-[#d1d4dc]" style={{ height: w }} />
+          </button>
         ))}
-      </>}
-      {sel.type === "fib" && <>
-        <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
-        <button data-testid="fib-reverse" onClick={() => onChange({ reverse: !sel.reverse })} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
-        <label className="flex items-center gap-1 text-xs text-[#b2b5be] shrink-0 px-1">
-          <input data-testid="fib-fill-toggle" type="checkbox" checked={sel.showFill !== false} onChange={(e) => onChange({ showFill: e.target.checked })} />
-          Arka plan
-        </label>
-        <details className="relative shrink-0">
-          <summary data-testid="fib-levels-settings" className="h-7 px-2 flex items-center rounded text-xs text-[#b2b5be] hover:bg-[#1e222d] cursor-pointer list-none">Oranlar ▾</summary>
-          <div className="absolute top-8 right-0 z-30 w-56 max-h-72 overflow-y-auto rounded-md border border-[#2a2e39] bg-[#131722] p-2 shadow-xl">
-            {(Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((level, index) => (
-              <div key={`${level.value}-${index}`} className="flex items-center gap-2 py-1">
-                <input aria-label={`${level.value} oranını göster`} data-testid={`fib-level-visible-${index}`} type="checkbox" checked={level.visible !== false} onChange={(e) => {
-                  const levels = (Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((item, i) => i === index ? { ...item, visible: e.target.checked } : item);
-                  onChange({ levels });
-                }} />
-                <span className="text-xs text-[#b2b5be] flex-1 tabular-nums">{level.value}</span>
-                <input aria-label={`${level.value} oranı rengi`} data-testid={`fib-level-color-${index}`} type="color" value={level.color || "#d1d4dc"} onChange={(e) => {
-                  const levels = (Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((item, i) => i === index ? { ...item, color: e.target.value } : item);
-                  onChange({ levels });
-                }} className="w-7 h-6 bg-transparent" />
-              </div>
-            ))}
-          </div>
-        </details>
-      </>}
-      {!styled && !isText && sel.type !== "fib" && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
+        {(styled || isText) && <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />}
+        {(styled || isText) && SWATCHES.map((c) => (
+          <button key={c} data-testid={`drawing-color-${c.slice(1)}`} onClick={() => onChange({ color: c })} className={`w-6 h-6 md:w-5 md:h-5 rounded-sm shrink-0 border ${sel.color === c ? "border-white" : "border-transparent"}`} style={{ background: c }} />
+        ))}
+        {(styled || isText) && <input type="color" data-testid="drawing-color-custom" value={sel.color || "#d1d4dc"} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 bg-transparent shrink-0" />}
+        {isText && <>
+          <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
+          {[12, 14, 16, 20, 24, 30].map((size) => (
+            <button key={size} data-testid={`drawing-font-size-${size}`} onClick={() => onChange({ fontSize: size })} className={`h-7 px-2 shrink-0 rounded text-xs ${Number(sel.fontSize || 14) === size ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>{size}</button>
+          ))}
+        </>}
+        {sel.type === "fib" && <>
+          <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
+          <button data-testid="fib-reverse" onClick={() => onChange({ reverse: !sel.reverse })} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
+          <label className="flex items-center gap-1 text-xs text-[#b2b5be] shrink-0 px-1">
+            <input data-testid="fib-fill-toggle" type="checkbox" checked={sel.showFill !== false} onChange={(e) => onChange({ showFill: e.target.checked })} />
+            Arka plan
+          </label>
+          <button type="button" data-testid="fib-levels-settings" aria-expanded={fibLevelsOpen} onClick={() => setFibLevelsOpen((open) => !open)} className={`h-7 px-2 shrink-0 rounded text-xs ${fibLevelsOpen ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>
+            Oranlar {fibLevelsOpen ? "▴" : "▾"}
+          </button>
+        </>}
+        {!styled && !isText && sel.type !== "fib" && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
+      </div>
+
+      {sel.type === "fib" && fibLevelsOpen && (
+        <div data-testid="fib-levels-panel" className="absolute top-full right-0 mt-1 z-50 w-60 max-h-80 overflow-y-auto rounded-md border border-[#2a2e39] bg-[#131722] p-3 shadow-2xl">
+          <div className="text-xs font-medium text-white mb-2">Fibonacci oranları</div>
+          {levels.map((level, index) => (
+            <div key={`${level.value}-${index}`} className="flex items-center gap-2 py-1.5">
+              <input aria-label={`${level.value} oranını göster`} data-testid={`fib-level-visible-${index}`} type="checkbox" checked={level.visible !== false} onChange={(e) => updateLevel(index, { visible: e.target.checked })} />
+              <span className="text-xs text-[#b2b5be] flex-1 tabular-nums">{level.value}</span>
+              <input aria-label={`${level.value} oranı rengi`} data-testid={`fib-level-color-${index}`} type="color" value={level.color || "#d1d4dc"} onChange={(e) => updateLevel(index, { color: e.target.value })} className="w-8 h-7 bg-transparent cursor-pointer" />
+            </div>
+          ))}
+          <div className="text-[10px] text-[#787b86] mt-2">Kutucuğu kapatarak oranı gizleyebilir, renk kutusundan çizgi rengini değiştirebilirsin.</div>
+        </div>
+      )}
     </div>
   );
 }
