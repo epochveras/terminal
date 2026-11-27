@@ -39,7 +39,6 @@ import {
   usePush,
   useIsMobile,
 } from "@/hooks/useTerminal";
-import { Splash } from "@/components/Splash";
 import ChartView from "@/components/ChartView";
 import { TopBar } from "@/components/TopBar";
 import {
@@ -73,18 +72,6 @@ const SYMBOL_CACHE_KEY = "ev_symbols";
 const SPLIT_MODE_KEY = "ev_chart_split_mode";
 const SECOND_SYMBOL_KEY = "ev_chart_second_symbol";
 const SECOND_TF_KEY = "ev_chart_second_tf";
-
-const TIMEFRAMES = [
-  "1m",
-  "3m",
-  "5m",
-  "15m",
-  "30m",
-  "1h",
-  "2h",
-  "4h",
-  "1d",
-];
 
 function getCachedSymbols() {
   try {
@@ -167,9 +154,6 @@ function ChartModeButton({
   );
 }
 
-const selectClass =
-  "h-7 max-w-[150px] rounded border border-[#2a2e39] bg-[#131722] px-2 text-xs text-[#d1d4dc] outline-none focus:border-[#2962ff]";
-
 export default function Terminal() {
   const { user, logout } = useAuth();
 
@@ -199,7 +183,7 @@ export default function Terminal() {
     () => readStorage(SECOND_SYMBOL_KEY, "ETHUSDT")
   );
 
-  const [secondTf, setSecondTf] = useState(
+  const [secondTf] = useState(
     () => readStorage(SECOND_TF_KEY, "15m")
   );
 
@@ -214,6 +198,9 @@ export default function Terminal() {
 
   const symbol = settings.symbol;
   const tf = settings.tf;
+
+  const mainActive = activeChart === "main";
+  const secondActive = activeChart === "second";
 
   const activeEngine = useCallback(() => {
     if (
@@ -386,6 +373,11 @@ export default function Terminal() {
   const meta = metaMap[symbol];
   const secondMeta = metaMap[secondSymbol];
 
+  const activeSymbol =
+    twoCharts && secondActive
+      ? secondSymbol
+      : symbol;
+
   const mobileFavoriteSymbols = useMemo(() => {
     const bySymbol = new Map(
       symbolList.map((item) => [item.symbol, item])
@@ -438,6 +430,7 @@ export default function Terminal() {
     return list;
   }, [favorites, symbolList, symbol, metaMap]);
 
+  // Alarm panelinden veya bildirimden seçilen coin ana grafiğe gider.
   const selectSymbol = useCallback(
     (s, keepSheetOpen = false) => {
       update({ symbol: s });
@@ -449,6 +442,25 @@ export default function Terminal() {
       }
     },
     [update]
+  );
+
+  // Watchlist ve arama penceresi aktif grafiği değiştirir.
+  const selectSymbolInActiveChart = useCallback(
+    (s, keepSheetOpen = false) => {
+      if (twoCharts && activeChart === "second") {
+        setSecondSymbol(s);
+        setSel(null);
+      } else {
+        update({ symbol: s });
+        setSel(null);
+        setActiveChart("main");
+      }
+
+      if (!keepSheetOpen) {
+        setSheet(null);
+      }
+    },
+    [twoCharts, activeChart, update]
   );
 
   const changeMobileFavorite = useCallback(
@@ -649,8 +661,10 @@ export default function Terminal() {
     watchlist: (
       <Watchlist
         symbols={symbolList}
-        current={symbol}
-        onSelect={(s) => selectSymbol(s, true)}
+        current={activeSymbol}
+        onSelect={(s) =>
+          selectSymbolInActiveChart(s, true)
+        }
         favorites={favorites}
         updateFavs={updateFavs}
         prefs={settings.watchlist}
@@ -675,8 +689,8 @@ export default function Terminal() {
 
     futures: (
       <FuturesPanel
-        symbol={symbol}
-        meta={meta}
+        symbol={activeSymbol}
+        meta={metaMap[activeSymbol]}
       />
     ),
   };
@@ -689,18 +703,6 @@ export default function Terminal() {
     (alarm) => alarm.active
   ).length;
 
-  const selectSecondSymbol = (value) => {
-    setSecondSymbol(value);
-    setSel(null);
-    setActiveChart("second");
-  };
-
-  const selectSecondTf = (value) => {
-    setSecondTf(value);
-    setSel(null);
-    setActiveChart("second");
-  };
-
   const activateMainChart = () => {
     setActiveChart("main");
     setSel(null);
@@ -710,9 +712,6 @@ export default function Terminal() {
     setActiveChart("second");
     setSel(null);
   };
-
-  const mainActive = activeChart === "main";
-  const secondActive = activeChart === "second";
 
   return (
     <div
@@ -804,51 +803,9 @@ export default function Terminal() {
                 )}
 
                 {twoCharts && !mobile && (
-                  <>
-                    <div className="h-5 w-px bg-[#2a2e39] mx-1" />
-
-                    <span className="text-[10px] text-[#787b86]">
-                      Grafik 2
-                    </span>
-
-                    <select
-                      data-testid="second-chart-symbol"
-                      aria-label="İkinci grafik sembolü"
-                      value={secondSymbol}
-                      onChange={(e) =>
-                        selectSecondSymbol(e.target.value)
-                      }
-                      className={selectClass}
-                    >
-                      {symbolList.map((item) => (
-                        <option
-                          key={item.symbol}
-                          value={item.symbol}
-                        >
-                          {item.symbol}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      data-testid="second-chart-timeframe"
-                      aria-label="İkinci grafik zaman dilimi"
-                      value={secondTf}
-                      onChange={(e) =>
-                        selectSecondTf(e.target.value)
-                      }
-                      className={selectClass}
-                    >
-                      {TIMEFRAMES.map((value) => (
-                        <option
-                          key={value}
-                          value={value}
-                        >
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </>
+                  <span className="ml-2 text-[10px] text-[#787b86]">
+                    Aktif grafik: {secondActive ? "2" : "1"}
+                  </span>
                 )}
 
                 <div className="ml-auto text-[10px] text-[#787b86]">
@@ -1176,7 +1133,7 @@ export default function Terminal() {
               key={item.symbol}
               value={item.symbol}
               onSelect={() => {
-                selectSymbol(item.symbol);
+                selectSymbolInActiveChart(item.symbol);
                 setSearch(false);
               }}
               data-testid={`symbol-option-${item.symbol}`}
