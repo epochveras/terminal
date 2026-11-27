@@ -1,9 +1,31 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { List, Bell, Activity, X, Pencil, ChevronUp, ChevronDown } from "lucide-react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { CommandDialog, CommandInput, CommandList, CommandEmpty, CommandItem } from "@/components/ui/command";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import {
+  List,
+  Bell,
+  Activity,
+  X,
+  Pencil,
+  ChevronUp,
+  ChevronDown,
+} from "lucide-react";
+import {
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+} from "react-resizable-panels";
+import {
+  CommandDialog,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandItem,
+} from "@/components/ui/command";
+import {
+  Sheet,
+  SheetContent,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { market, fetchSymbols } from "@/lib/market";
@@ -11,13 +33,31 @@ import { decFromTick } from "@/lib/format";
 import { EPOCH_SCHEMA, RSI_SCHEMA } from "@/lib/indicators";
 import { unlockAudio } from "@/lib/alerts";
 import { useAuth } from "@/context/AuthContext";
-import { useWorkspace, useAlarms, usePush, useIsMobile } from "@/hooks/useTerminal";
+import {
+  useWorkspace,
+  useAlarms,
+  usePush,
+  useIsMobile,
+} from "@/hooks/useTerminal";
 import { Splash } from "@/components/Splash";
 import ChartView from "@/components/ChartView";
 import { TopBar } from "@/components/TopBar";
-import { DrawingToolbar, DrawingProps, STYLED } from "@/components/Drawing";
+import {
+  DrawingToolbar,
+  DrawingProps,
+  STYLED,
+} from "@/components/Drawing";
 import { AlarmNotices } from "@/components/AlarmNotices";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Watchlist } from "@/components/Watchlist";
 import { AlarmPanel } from "@/components/AlarmPanel";
 import { FuturesPanel } from "@/components/FuturesPanel";
@@ -30,6 +70,21 @@ const PANELS = [
 ];
 
 const SYMBOL_CACHE_KEY = "ev_symbols";
+const SPLIT_MODE_KEY = "ev_chart_split_mode";
+const SECOND_SYMBOL_KEY = "ev_chart_second_symbol";
+const SECOND_TF_KEY = "ev_chart_second_tf";
+
+const TIMEFRAMES = [
+  "1m",
+  "3m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "2h",
+  "4h",
+  "1d",
+];
 
 function getCachedSymbols() {
   try {
@@ -37,13 +92,29 @@ function getCachedSymbols() {
       localStorage.getItem(SYMBOL_CACHE_KEY) || "null"
     );
 
-    return Array.isArray(cached) && cached.length ? cached : null;
+    return Array.isArray(cached) && cached.length
+      ? cached
+      : null;
   } catch {
     return null;
   }
 }
 
-function PanelBox({ id, title, Icon, onClose, children }) {
+function readStorage(key, fallback) {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function PanelBox({
+  id,
+  title,
+  Icon,
+  onClose,
+  children,
+}) {
   return (
     <div
       className="flex flex-col h-full min-h-0 bg-[#0c0d0f]"
@@ -51,6 +122,7 @@ function PanelBox({ id, title, Icon, onClose, children }) {
     >
       <div className="flex items-center gap-2 px-3 h-8 border-b border-[#1e222d] shrink-0">
         <Icon size={13} className="text-[#787b86]" />
+
         <span className="text-[11px] font-semibold tracking-[0.12em] uppercase text-[#d1d4dc]">
           {title}
         </span>
@@ -66,10 +138,37 @@ function PanelBox({ id, title, Icon, onClose, children }) {
         )}
       </div>
 
-      <div className="flex-1 min-h-0">{children}</div>
+      <div className="flex-1 min-h-0">
+        {children}
+      </div>
     </div>
   );
 }
+
+function ChartModeButton({
+  active,
+  onClick,
+  children,
+  testId,
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={onClick}
+      className={`h-7 min-w-8 px-2 rounded text-xs font-semibold transition-colors ${
+        active
+          ? "bg-[#2962ff] text-white"
+          : "bg-[#1e222d] text-[#b2b5be] hover:text-white"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+const selectClass =
+  "h-7 max-w-[150px] rounded border border-[#2a2e39] bg-[#131722] px-2 text-xs text-[#d1d4dc] outline-none focus:border-[#2962ff]";
 
 export default function Terminal() {
   const { user, logout } = useAuth();
@@ -81,7 +180,10 @@ export default function Terminal() {
     updateFavs,
   } = useWorkspace(user?.id);
 
-  const [symbols, setSymbols] = useState(() => getCachedSymbols());
+  const [symbols, setSymbols] = useState(
+    () => getCachedSymbols()
+  );
+
   const [tool, setTool] = useState("cursor");
   const [sel, setSel] = useState(null);
   const [search, setSearch] = useState(false);
@@ -89,14 +191,41 @@ export default function Terminal() {
   const [live, setLive] = useState(false);
   const [sheet, setSheet] = useState(null);
 
+  const [twoCharts, setTwoCharts] = useState(
+    () => readStorage(SPLIT_MODE_KEY, "0") === "1"
+  );
+
+  const [secondSymbol, setSecondSymbol] = useState(
+    () => readStorage(SECOND_SYMBOL_KEY, "ETHUSDT")
+  );
+
+  const [secondTf, setSecondTf] = useState(
+    () => readStorage(SECOND_TF_KEY, "15m")
+  );
+
+  const [activeChart, setActiveChart] = useState("main");
+
   const drawingOpen = settings.drawingOpen ?? true;
 
   const engine = useRef(null);
+  const secondEngine = useRef(null);
   const mobile = useIsMobile();
   const mobileSwipeStart = useRef(null);
 
   const symbol = settings.symbol;
   const tf = settings.tf;
+
+  const activeEngine = useCallback(() => {
+    if (
+      twoCharts &&
+      activeChart === "second" &&
+      secondEngine.current
+    ) {
+      return secondEngine.current;
+    }
+
+    return engine.current;
+  }, [twoCharts, activeChart]);
 
   useEffect(() => {
     let alive = true;
@@ -136,12 +265,14 @@ export default function Terminal() {
         setSymbols((current) =>
           current?.length
             ? current
-            : [{
-                symbol: settings.symbol || "BTCUSDT",
-                tick: "0.01",
-                dec: 2,
-                type: "COIN",
-              }]
+            : [
+                {
+                  symbol: settings.symbol || "BTCUSDT",
+                  tick: "0.01",
+                  dec: 2,
+                  type: "COIN",
+                },
+              ]
         );
 
         retryTimer = setTimeout(load, 10000);
@@ -176,6 +307,48 @@ export default function Terminal() {
     };
   }, [update, settings.symbol]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SPLIT_MODE_KEY,
+        twoCharts ? "1" : "0"
+      );
+    } catch {}
+  }, [twoCharts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SECOND_SYMBOL_KEY,
+        secondSymbol
+      );
+    } catch {}
+  }, [secondSymbol]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SECOND_TF_KEY,
+        secondTf
+      );
+    } catch {}
+  }, [secondTf]);
+
+  useEffect(() => {
+    if (mobile && twoCharts) {
+      setTwoCharts(false);
+      setActiveChart("main");
+      setSel(null);
+    }
+  }, [mobile, twoCharts]);
+
+  useEffect(() => {
+    if (!twoCharts) {
+      setActiveChart("main");
+      setSel(null);
+    }
+  }, [twoCharts]);
+
   const metaMap = useMemo(() => {
     const map = Object.fromEntries(
       (symbols || []).map((s) => [s.symbol, s])
@@ -190,8 +363,17 @@ export default function Terminal() {
       };
     }
 
+    if (!map[secondSymbol]) {
+      map[secondSymbol] = {
+        symbol: secondSymbol,
+        tick: "0.01",
+        dec: 2,
+        type: "COIN",
+      };
+    }
+
     return map;
-  }, [symbols, symbol]);
+  }, [symbols, symbol, secondSymbol]);
 
   const symbolList = useMemo(() => {
     const list = symbols || [];
@@ -202,11 +384,8 @@ export default function Terminal() {
   }, [symbols, symbol, metaMap]);
 
   const meta = metaMap[symbol];
+  const secondMeta = metaMap[secondSymbol];
 
-  // Mobil coin listesi:
-  // Önce bütün favori gruplarını alır.
-  // Ardından eksik kalan kripto sembollerini ekler.
-  // Aynı sembol ikinci kez eklenmez.
   const mobileFavoriteSymbols = useMemo(() => {
     const bySymbol = new Map(
       symbolList.map((item) => [item.symbol, item])
@@ -231,23 +410,25 @@ export default function Terminal() {
       list.push(item);
     };
 
-    // Bütün favori gruplarını dolaş.
-    (Array.isArray(favorites) ? favorites : []).forEach((group) => {
-      (Array.isArray(group?.symbols) ? group.symbols : []).forEach(
-        addSymbol
-      );
-    });
+    (Array.isArray(favorites) ? favorites : []).forEach(
+      (group) => {
+        (
+          Array.isArray(group?.symbols)
+            ? group.symbols
+            : []
+        ).forEach(addSymbol);
+      }
+    );
 
-    // Favorilerdeki coinlerden sonra diğer kripto sembollerini ekle.
     symbolList.forEach((item) => {
       if (item.type !== "COMMODITY") {
         addSymbol(item.symbol);
       }
     });
 
-    // Seçili sembol listede yoksa kaybetme.
     if (!seen.has(symbol)) {
-      const current = bySymbol.get(symbol) || metaMap[symbol];
+      const current =
+        bySymbol.get(symbol) || metaMap[symbol];
 
       if (current) {
         list.unshift(current);
@@ -261,6 +442,7 @@ export default function Terminal() {
     (s, keepSheetOpen = false) => {
       update({ symbol: s });
       setSel(null);
+      setActiveChart("main");
 
       if (!keepSheetOpen) {
         setSheet(null);
@@ -269,7 +451,6 @@ export default function Terminal() {
     [update]
   );
 
-  // direction: 1 sonraki, -1 önceki coin.
   const changeMobileFavorite = useCallback(
     (direction) => {
       const list = mobileFavoriteSymbols;
@@ -283,7 +464,8 @@ export default function Terminal() {
       const index = currentIndex < 0 ? 0 : currentIndex;
 
       const nextIndex =
-        (index + direction + list.length) % list.length;
+        (index + direction + list.length) %
+        list.length;
 
       const nextSymbol = list[nextIndex]?.symbol;
 
@@ -307,116 +489,137 @@ export default function Terminal() {
     const startY = mobileSwipeStart.current;
     mobileSwipeStart.current = null;
 
-    if (startY == null || !e.changedTouches?.length) return;
+    if (
+      startY == null ||
+      !e.changedTouches?.length
+    ) {
+      return;
+    }
 
     const deltaY =
       e.changedTouches[0].clientY - startY;
 
     if (Math.abs(deltaY) < 20) return;
 
-    // Yukarı kaydırma: sonraki coin.
-    // Aşağı kaydırma: önceki coin.
-    changeMobileFavorite(deltaY < 0 ? 1 : -1);
+    changeMobileFavorite(
+      deltaY < 0 ? 1 : -1
+    );
   };
 
   const [notices, setNotices] = useState([]);
   const [confirmClear, setConfirmClear] = useState(false);
 
   const closeNotice = useCallback(
-    (id) => setNotices((l) => l.filter((x) => x.id !== id)),
+    (id) =>
+      setNotices((list) =>
+        list.filter((item) => item.id !== id)
+      ),
     []
   );
 
-  const onTrigger = useCallback((a) => {
-    setNotices((l) => [...l.slice(-3), a]);
-    setTimeout(() => closeNotice(a.id), 20000);
-  }, [closeNotice]);
+  const onTrigger = useCallback(
+    (alarm) => {
+      setNotices((list) => [
+        ...list.slice(-3),
+        alarm,
+      ]);
+
+      setTimeout(
+        () => closeNotice(alarm.id),
+        20000
+      );
+    },
+    [closeNotice]
+  );
 
   const {
     alarms,
     add,
     remove,
     clearHistory,
-  } = useAlarms(settings.sound, metaMap, onTrigger);
+  } = useAlarms(
+    settings.sound,
+    metaMap,
+    onTrigger
+  );
 
   const push = usePush();
 
-  useEffect(() => {
-    engine.current?.setTool(tool);
-  }, [tool]);
+  const saveTimers = useRef({});
 
-  useEffect(() => {
-    engine.current?.setMagnet(settings.magnet);
-    engine.current?.setDefaults(settings.toolDefaults);
-  }, [settings.magnet, settings.toolDefaults, meta]);
-
-  const saveTimer = useRef();
   const [hist, setHist] = useState({
     undo: false,
     redo: false,
   });
 
-  useEffect(() => {
-    const onKey = (e) => {
-      if (
-        !(e.ctrlKey || e.metaKey) ||
-        /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) ||
-        e.target.isContentEditable
-      ) {
-        return;
-      }
+  const makeChartCallbacks = (chartId, chartSymbol) => ({
+    onSelect: (drawing) => {
+      setActiveChart(chartId);
+      setSel(drawing);
+    },
 
-      const k = e.key.toLowerCase();
-
-      if (k === "z" && !e.shiftKey) {
-        e.preventDefault();
-        engine.current?.undo();
-      } else if (k === "y" || (k === "z" && e.shiftKey)) {
-        e.preventDefault();
-        engine.current?.redo();
-      }
-    };
-
-    window.addEventListener("keydown", onKey);
-
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  const cb = {
-    onSelect: setSel,
-
-    onToolDone: () => setTool("cursor"),
+    onToolDone: () => {
+      setTool("cursor");
+    },
 
     onDrawingsChange: (list) => {
-      const s = symbol;
+      clearTimeout(saveTimers.current[chartSymbol]);
 
-      clearTimeout(saveTimer.current);
-
-      saveTimer.current = setTimeout(() => {
-        api.put(`/drawings/${s}`, { drawings: list })
-          .catch(() => toast.error("Çizim kaydedilemedi"));
-      }, 500);
+      saveTimers.current[chartSymbol] = setTimeout(
+        () => {
+          api
+            .put(`/drawings/${chartSymbol}`, {
+              drawings: list,
+            })
+            .catch(() =>
+              toast.error("Çizim kaydedilemedi")
+            );
+        },
+        500
+      );
     },
 
     onAddAlarm: (price) =>
-      add(symbol, price, market.tickers[symbol]?.c),
+      add(
+        chartSymbol,
+        price,
+        market.tickers[chartSymbol]?.c
+      ),
 
     onDeleteAlarm: (id) => remove(id),
 
-    onRsiRatio: (r) => update({ rsiRatio: r }),
+    onRsiRatio: (ratio) =>
+      update({ rsiRatio: ratio }),
 
-    onHistory: setHist,
-  };
+    onHistory: (history) => {
+      if (
+        (chartId === "main" && activeChart === "main") ||
+        (chartId === "second" && activeChart === "second")
+      ) {
+        setHist(history);
+      }
+    },
+
+    onInteract: () => {
+      setActiveChart(chartId);
+    },
+  });
+
+  const mainCb = makeChartCallbacks("main", symbol);
+  const secondCb = makeChartCallbacks(
+    "second",
+    secondSymbol
+  );
 
   const changeDrawing = (patch) => {
-    engine.current?.updateSelected(patch);
+    activeEngine()?.updateSelected(patch);
 
     if (sel && STYLED.includes(sel.type)) {
-      update((s) => ({
+      update((current) => ({
         toolDefaults: {
-          ...s.toolDefaults,
+          ...current.toolDefaults,
           [sel.type]: {
-            ...(s.toolDefaults[sel.type] || {}),
+            ...(current.toolDefaults?.[sel.type] || {}),
             ...patch,
           },
         },
@@ -424,19 +627,21 @@ export default function Terminal() {
     }
   };
 
-  const setPanel = (k, v) =>
-    update((s) => ({
+  const setPanel = (key, value) =>
+    update((current) => ({
       panels: {
-        ...s.panels,
-        [k]: v,
+        ...current.panels,
+        [key]: value,
       },
     }));
 
-  const togglePanel = (k) => {
+  const togglePanel = (key) => {
     if (mobile) {
-      setSheet(sheet === k ? null : k);
+      setSheet((current) =>
+        current === key ? null : key
+      );
     } else {
-      setPanel(k, !settings.panels[k]);
+      setPanel(key, !settings.panels[key]);
     }
   };
 
@@ -477,12 +682,37 @@ export default function Terminal() {
   };
 
   const open = PANELS.filter(
-    ([k]) => settings.panels[k]
+    ([key]) => settings.panels[key]
   );
 
   const activeCount = alarms.filter(
-    (a) => a.active
+    (alarm) => alarm.active
   ).length;
+
+  const selectSecondSymbol = (value) => {
+    setSecondSymbol(value);
+    setSel(null);
+    setActiveChart("second");
+  };
+
+  const selectSecondTf = (value) => {
+    setSecondTf(value);
+    setSel(null);
+    setActiveChart("second");
+  };
+
+  const activateMainChart = () => {
+    setActiveChart("main");
+    setSel(null);
+  };
+
+  const activateSecondChart = () => {
+    setActiveChart("second");
+    setSel(null);
+  };
+
+  const mainActive = activeChart === "main";
+  const secondActive = activeChart === "second";
 
   return (
     <div
@@ -492,22 +722,22 @@ export default function Terminal() {
       <TopBar
         symbol={symbol}
         tf={tf}
-        setTf={(k) => update({ tf: k })}
+        setTf={(key) => update({ tf: key })}
         onSearch={() => setSearch(true)}
         settings={settings}
-        toggleInd={(k, c) =>
-          update((s) => ({
-            [k]: {
-              ...s[k],
-              enabled: c,
+        toggleInd={(key, enabled) =>
+          update((current) => ({
+            [key]: {
+              ...current[key],
+              enabled,
             },
           }))
         }
         openInd={setIndDlg}
         onAlarm={() => togglePanel("alarms")}
         hist={hist}
-        onUndo={() => engine.current?.undo()}
-        onRedo={() => engine.current?.redo()}
+        onUndo={() => activeEngine()?.undo()}
+        onRedo={() => activeEngine()?.redo()}
         live={live}
         user={user}
         logout={logout}
@@ -519,8 +749,12 @@ export default function Terminal() {
             tool={tool}
             setTool={setTool}
             magnet={settings.magnet}
-            setMagnet={(m) => update({ magnet: m })}
-            onClear={() => setConfirmClear(true)}
+            setMagnet={(value) =>
+              update({ magnet: value })
+            }
+            onClear={() =>
+              setConfirmClear(true)
+            }
           />
         )}
 
@@ -529,65 +763,249 @@ export default function Terminal() {
           autoSaveId="ev-main"
           className="flex-1 min-w-0"
         >
-          <Panel id="chart" order={1} minSize={35}>
-            <div className="relative h-full">
-              <ChartView
-                symbol={symbol}
-                meta={meta}
-                tf={tf}
-                settings={settings}
-                alarms={alarms}
-                cb={cb}
-                engineRef={engine}
-              />
+          <Panel
+            id="chart"
+            order={1}
+            minSize={35}
+          >
+            <div className="relative h-full min-h-0 flex flex-col bg-black">
+              <div
+                className="h-9 shrink-0 flex items-center gap-2 px-2 border-b border-[#1e222d] bg-[#0c0d0f]"
+                data-testid="chart-layout-toolbar"
+              >
+                <span className="text-[10px] uppercase tracking-wider text-[#787b86] mr-1">
+                  Grafik
+                </span>
 
-              {mobile && mobileFavoriteSymbols.length > 0 && (
-                <div
-                  data-testid="mobile-favorite-switcher"
-                  className="absolute bottom-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 rounded-md border border-[#363b49] bg-[#131722]/95 px-1.5 py-1 shadow-xl select-none"
-                  style={{ touchAction: "none" }}
-                  onTouchStart={handleMobileCoinTouchStart}
-                  onTouchEnd={handleMobileCoinTouchEnd}
-                  onTouchCancel={() => {
-                    mobileSwipeStart.current = null;
+                <ChartModeButton
+                  active={!twoCharts}
+                  onClick={() => {
+                    setTwoCharts(false);
+                    setActiveChart("main");
+                    setSel(null);
                   }}
+                  testId="chart-layout-one"
                 >
-                  <button
-                    type="button"
-                    data-testid="mobile-favorite-previous"
-                    aria-label="Önceki coin"
-                    disabled={mobileFavoriteSymbols.length < 2}
-                    onClick={() => changeMobileFavorite(-1)}
-                    className="flex h-7 w-6 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30"
-                  >
-                    <ChevronUp size={17} />
-                  </button>
+                  1
+                </ChartModeButton>
 
-                  <span
-                    data-testid="mobile-favorite-current"
-                    className="min-w-[76px] text-center text-[12px] font-semibold tracking-wide text-white"
+                {!mobile && (
+                  <ChartModeButton
+                    active={twoCharts}
+                    onClick={() => {
+                      setTwoCharts(true);
+                      setActiveChart("main");
+                      setSel(null);
+                    }}
+                    testId="chart-layout-two"
                   >
-                    {symbol}
-                  </span>
+                    2
+                  </ChartModeButton>
+                )}
 
-                  <button
-                    type="button"
-                    data-testid="mobile-favorite-next"
-                    aria-label="Sonraki coin"
-                    disabled={mobileFavoriteSymbols.length < 2}
-                    onClick={() => changeMobileFavorite(1)}
-                    className="flex h-7 w-6 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30"
-                  >
-                    <ChevronDown size={17} />
-                  </button>
+                {twoCharts && !mobile && (
+                  <>
+                    <div className="h-5 w-px bg-[#2a2e39] mx-1" />
+
+                    <span className="text-[10px] text-[#787b86]">
+                      Grafik 2
+                    </span>
+
+                    <select
+                      data-testid="second-chart-symbol"
+                      aria-label="İkinci grafik sembolü"
+                      value={secondSymbol}
+                      onChange={(e) =>
+                        selectSecondSymbol(e.target.value)
+                      }
+                      className={selectClass}
+                    >
+                      {symbolList.map((item) => (
+                        <option
+                          key={item.symbol}
+                          value={item.symbol}
+                        >
+                          {item.symbol}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      data-testid="second-chart-timeframe"
+                      aria-label="İkinci grafik zaman dilimi"
+                      value={secondTf}
+                      onChange={(e) =>
+                        selectSecondTf(e.target.value)
+                      }
+                      className={selectClass}
+                    >
+                      {TIMEFRAMES.map((value) => (
+                        <option
+                          key={value}
+                          value={value}
+                        >
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+
+                <div className="ml-auto text-[10px] text-[#787b86]">
+                  {twoCharts && !mobile
+                    ? "İki grafik"
+                    : "Tek grafik"}
                 </div>
-              )}
+              </div>
 
-              <DrawingProps
-                sel={sel}
-                onChange={changeDrawing}
-                onDelete={() => engine.current?.deleteSelected()}
-              />
+              <div
+                className={`flex-1 min-h-0 flex ${
+                  twoCharts && !mobile
+                    ? "flex-row"
+                    : "flex-col"
+                }`}
+              >
+                <div
+                  data-testid="main-chart-pane"
+                  onMouseDown={() => {
+                    if (!mainActive) {
+                      activateMainChart();
+                    }
+                  }}
+                  onTouchStart={() => {
+                    if (!mainActive) {
+                      activateMainChart();
+                    }
+                  }}
+                  className={`relative min-w-0 min-h-0 ${
+                    twoCharts && !mobile
+                      ? "w-1/2 h-full border-r border-[#2a2e39]"
+                      : "w-full h-full"
+                  } ${
+                    mainActive && twoCharts
+                      ? "ring-1 ring-inset ring-[#2962ff]/50"
+                      : ""
+                  }`}
+                >
+                  <ChartView
+                    symbol={symbol}
+                    meta={meta}
+                    tf={tf}
+                    settings={settings}
+                    alarms={alarms}
+                    cb={mainCb}
+                    engineRef={engine}
+                    tool={mainActive ? tool : "cursor"}
+                    magnet={settings.magnet}
+                    toolDefaults={settings.toolDefaults}
+                  />
+
+                  {mobile &&
+                    mobileFavoriteSymbols.length > 0 && (
+                      <div
+                        data-testid="mobile-favorite-switcher"
+                        className="absolute bottom-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 rounded-md border border-[#363b49] bg-[#131722]/95 px-1.5 py-1 shadow-xl select-none"
+                        style={{ touchAction: "none" }}
+                        onTouchStart={handleMobileCoinTouchStart}
+                        onTouchEnd={handleMobileCoinTouchEnd}
+                        onTouchCancel={() => {
+                          mobileSwipeStart.current = null;
+                        }}
+                      >
+                        <button
+                          type="button"
+                          data-testid="mobile-favorite-previous"
+                          aria-label="Önceki coin"
+                          disabled={
+                            mobileFavoriteSymbols.length < 2
+                          }
+                          onClick={() =>
+                            changeMobileFavorite(-1)
+                          }
+                          className="flex h-7 w-6 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30"
+                        >
+                          <ChevronUp size={17} />
+                        </button>
+
+                        <span
+                          data-testid="mobile-favorite-current"
+                          className="min-w-[76px] text-center text-[12px] font-semibold tracking-wide text-white"
+                        >
+                          {symbol}
+                        </span>
+
+                        <button
+                          type="button"
+                          data-testid="mobile-favorite-next"
+                          aria-label="Sonraki coin"
+                          disabled={
+                            mobileFavoriteSymbols.length < 2
+                          }
+                          onClick={() =>
+                            changeMobileFavorite(1)
+                          }
+                          className="flex h-7 w-6 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30"
+                        >
+                          <ChevronDown size={17} />
+                        </button>
+                      </div>
+                    )}
+
+                  {mainActive && (
+                    <DrawingProps
+                      sel={sel}
+                      onChange={changeDrawing}
+                      onDelete={() =>
+                        activeEngine()?.deleteSelected()
+                      }
+                    />
+                  )}
+                </div>
+
+                {twoCharts && !mobile && (
+                  <div
+                    data-testid="second-chart-pane"
+                    onMouseDown={() => {
+                      if (!secondActive) {
+                        activateSecondChart();
+                      }
+                    }}
+                    onTouchStart={() => {
+                      if (!secondActive) {
+                        activateSecondChart();
+                      }
+                    }}
+                    className={`relative min-w-0 min-h-0 w-1/2 h-full ${
+                      secondActive
+                        ? "ring-1 ring-inset ring-[#2962ff]/50"
+                        : ""
+                    }`}
+                  >
+                    <ChartView
+                      symbol={secondSymbol}
+                      meta={secondMeta}
+                      tf={secondTf}
+                      settings={settings}
+                      alarms={alarms}
+                      cb={secondCb}
+                      engineRef={secondEngine}
+                      tool={secondActive ? tool : "cursor"}
+                      magnet={settings.magnet}
+                      toolDefaults={settings.toolDefaults}
+                    />
+
+                    {secondActive && (
+                      <DrawingProps
+                        sel={sel}
+                        onChange={changeDrawing}
+                        onDelete={() =>
+                          activeEngine()?.deleteSelected()
+                        }
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </Panel>
 
@@ -607,33 +1025,39 @@ export default function Terminal() {
               >
                 <PanelGroup
                   direction="vertical"
-                  autoSaveId={`ev-side-${open.map((x) => x[0]).join("-")}`}
+                  autoSaveId={`ev-side-${open
+                    .map((item) => item[0])
+                    .join("-")}`}
                 >
-                  {open.map(([k, title, Icon], i) => (
-                    <Fragment key={k}>
-                      {i > 0 && (
-                        <PanelResizeHandle
-                          className="ev-handle h-[3px]"
-                          data-testid={`panel-resize-${k}`}
-                        />
-                      )}
+                  {open.map(
+                    ([key, title, Icon], index) => (
+                      <Fragment key={key}>
+                        {index > 0 && (
+                          <PanelResizeHandle
+                            className="ev-handle h-[3px]"
+                            data-testid={`panel-resize-${key}`}
+                          />
+                        )}
 
-                      <Panel
-                        id={k}
-                        order={i + 1}
-                        minSize={8}
-                      >
-                        <PanelBox
-                          id={k}
-                          title={title}
-                          Icon={Icon}
-                          onClose={() => setPanel(k, false)}
+                        <Panel
+                          id={key}
+                          order={index + 1}
+                          minSize={8}
                         >
-                          {content[k]}
-                        </PanelBox>
-                      </Panel>
-                    </Fragment>
-                  ))}
+                          <PanelBox
+                            id={key}
+                            title={title}
+                            Icon={Icon}
+                            onClose={() =>
+                              setPanel(key, false)
+                            }
+                          >
+                            {content[key]}
+                          </PanelBox>
+                        </Panel>
+                      </Fragment>
+                    )
+                  )}
                 </PanelGroup>
               </Panel>
             </>
@@ -644,17 +1068,21 @@ export default function Terminal() {
           className="w-11 shrink-0 bg-[#0c0d0f] border-l border-[#2a2e39] flex flex-col items-center gap-1 py-2"
           data-testid="right-rail"
         >
-          {PANELS.map(([k, title, Icon]) => {
+          {PANELS.map(([key, title, Icon]) => {
             const on = mobile
-              ? sheet === k
-              : settings.panels[k];
+              ? sheet === key
+              : settings.panels[key];
 
             return (
               <button
-                key={k}
-                data-testid={`${k === "futures" ? "futures-data" : k}-tab-button`}
+                key={key}
+                data-testid={`${
+                  key === "futures"
+                    ? "futures-data"
+                    : key
+                }-tab-button`}
                 title={title}
-                onClick={() => togglePanel(k)}
+                onClick={() => togglePanel(key)}
                 className={`relative w-10 h-10 md:w-9 md:h-9 flex items-center justify-center rounded-md ${
                   on
                     ? "bg-[#1e222d] text-white"
@@ -663,11 +1091,12 @@ export default function Terminal() {
               >
                 <Icon size={18} />
 
-                {k === "alarms" && activeCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#e0a020] text-black text-[10px] font-bold flex items-center justify-center">
-                    {activeCount}
-                  </span>
-                )}
+                {key === "alarms" &&
+                  activeCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#e0a020] text-black text-[10px] font-bold flex items-center justify-center">
+                      {activeCount}
+                    </span>
+                  )}
               </button>
             );
           })}
@@ -676,7 +1105,9 @@ export default function Terminal() {
             data-testid="drawing-toolbar-toggle"
             title="Çizim araçları"
             onClick={() =>
-              update({ drawingOpen: !drawingOpen })
+              update({
+                drawingOpen: !drawingOpen,
+              })
             }
             className={`relative w-10 h-10 md:w-9 md:h-9 flex items-center justify-center rounded-md ${
               drawingOpen
@@ -692,7 +1123,9 @@ export default function Terminal() {
       {mobile && (
         <Sheet
           open={!!sheet}
-          onOpenChange={(o) => !o && setSheet(null)}
+          onOpenChange={(open) =>
+            !open && setSheet(null)
+          }
         >
           <SheetContent
             side="bottom"
@@ -703,21 +1136,23 @@ export default function Terminal() {
               {sheet}
             </SheetTitle>
 
-            {sheet && (() => {
-              const [k, title, Icon] = PANELS.find(
-                (p) => p[0] === sheet
-              );
+            {sheet &&
+              (() => {
+                const [key, title, Icon] =
+                  PANELS.find(
+                    (item) => item[0] === sheet
+                  );
 
-              return (
-                <PanelBox
-                  id={`m-${k}`}
-                  title={title}
-                  Icon={Icon}
-                >
-                  {content[k]}
-                </PanelBox>
-              );
-            })()}
+                return (
+                  <PanelBox
+                    id={`m-${key}`}
+                    title={title}
+                    Icon={Icon}
+                  >
+                    {content[key]}
+                  </PanelBox>
+                );
+              })()}
           </SheetContent>
         </Sheet>
       )}
@@ -732,28 +1167,31 @@ export default function Terminal() {
         />
 
         <CommandList className="max-h-[60vh]">
-          <CommandEmpty>Bulunamadı</CommandEmpty>
+          <CommandEmpty>
+            Bulunamadı
+          </CommandEmpty>
 
-          {symbolList.map((s) => (
+          {symbolList.map((item) => (
             <CommandItem
-              key={s.symbol}
-              value={s.symbol}
+              key={item.symbol}
+              value={item.symbol}
               onSelect={() => {
-                selectSymbol(s.symbol);
+                selectSymbol(item.symbol);
                 setSearch(false);
               }}
-              data-testid={`symbol-option-${s.symbol}`}
+              data-testid={`symbol-option-${item.symbol}`}
             >
               <span className="font-semibold">
-                {s.symbol}
+                {item.symbol}
               </span>
 
               <span className="ml-auto text-[11px] text-[#787b86]">
-                {s.type === "COMMODITY"
+                {item.type === "COMMODITY"
                   ? "Emtia"
-                  : s.type === "COIN"
+                  : item.type === "COIN"
                     ? "Kripto"
-                    : s.type} · Perpetual
+                    : item.type}{" "}
+                · Perpetual
               </span>
             </CommandItem>
           ))}
@@ -764,9 +1202,9 @@ export default function Terminal() {
         items={notices}
         metaMap={metaMap}
         onClose={closeNotice}
-        onOpen={(a) => {
-          selectSymbol(a.symbol);
-          closeNotice(a.id);
+        onOpen={(alarm) => {
+          selectSymbol(alarm.symbol);
+          closeNotice(alarm.id);
         }}
       />
 
@@ -784,7 +1222,11 @@ export default function Terminal() {
             </AlertDialogTitle>
 
             <AlertDialogDescription className="text-[13px] text-[#787b86]">
-              {symbol} grafiğindeki tüm çizimler kalıcı olarak silinecek. Bu işlem geri alınamaz.
+              {activeChart === "second"
+                ? secondSymbol
+                : symbol}{" "}
+              grafiğindeki tüm çizimler kalıcı olarak
+              silinecek. Bu işlem geri alınamaz.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -797,7 +1239,9 @@ export default function Terminal() {
             </AlertDialogCancel>
 
             <AlertDialogAction
-              onClick={() => engine.current?.clearDrawings()}
+              onClick={() =>
+                activeEngine()?.clearDrawings()
+              }
               className="bg-[#f23645] hover:bg-[#d92c3a] text-white"
             >
               Hepsini sil
@@ -809,7 +1253,9 @@ export default function Terminal() {
       {indDlg && (
         <IndicatorDialog
           open
-          onOpenChange={(o) => !o && setIndDlg(null)}
+          onOpenChange={(open) =>
+            !open && setIndDlg(null)
+          }
           title={
             indDlg === "epoch"
               ? "Epoch Script"
@@ -821,11 +1267,11 @@ export default function Terminal() {
               : RSI_SCHEMA
           }
           values={settings[indDlg]?.values}
-          onChange={(vals) =>
-            update((s) => ({
+          onChange={(values) =>
+            update((current) => ({
               [indDlg]: {
-                ...s[indDlg],
-                values: vals,
+                ...current[indDlg],
+                values,
               },
             }))
           }
