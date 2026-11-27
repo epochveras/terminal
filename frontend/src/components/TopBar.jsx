@@ -245,7 +245,6 @@ export function TopBar({
               live ? "bg-[#089981]" : "bg-[#e0a020]"
             }`}
           />
-
           {live ? "Canlı" : "Yedek akış"}
         </span>
 
