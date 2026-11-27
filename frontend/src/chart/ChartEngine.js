@@ -12,6 +12,18 @@ const TZ = 3 * 3600e3;
 const TWO = ["trendline", "rect", "fib"];
 const FIB = [[0, "#787b86"], [0.236, "#f23645"], [0.382, "#ff9800"], [0.5, "#4caf50"], [0.618, "#089981"], [0.786, "#00bcd4"], [1, "#787b86"], [1.618, "#2962ff"]];
 const fibDefaults = () => FIB.map(([value, color]) => ({ value, color, visible: true }));
+const FIB_PREF_KEY = "epochveras_fib_preferences_v1";
+function fibSettings() {
+  const fallback = { levels: fibDefaults(), showFill: true, reverse: false };
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(FIB_PREF_KEY) || "null");
+    if (!saved || typeof saved !== "object") return fallback;
+    const levels = Array.isArray(saved.levels) && saved.levels.length
+      ? saved.levels.filter((x) => Number.isFinite(Number(x.value))).map((x) => ({ value: Number(x.value), color: typeof x.color === "string" ? x.color : "#d1d4dc", visible: x.visible !== false }))
+      : fallback.levels;
+    return { levels, showFill: saved.showFill !== false, reverse: saved.reverse === true };
+  } catch (_) { return fallback; }
+}
 const fibLevels = (d) => Array.isArray(d.levels) && d.levels.length
   ? d.levels.filter((x) => Number.isFinite(Number(x.value))).slice().sort((a, b) => Number(a.value) - Number(b.value))
   : fibDefaults();
@@ -724,7 +736,7 @@ export class ChartEngine {
       }
       this.tool = "cursor"; this.cb.onToolDone?.(); this.mode = { k: "none" }; this.dirty(); return;
     }
-    if (TWO.includes(t)) this.creating = { k: "drag", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? { levels: fibDefaults(), showFill: true, reverse: false } : {}) }, x0: p.x, y0: p.y };
+    if (TWO.includes(t)) this.creating = { k: "drag", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? fibSettings() : {}) }, x0: p.x, y0: p.y };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "drag", ruler: true, x0: p.x, y0: p.y }; }
     else if (t === "hray" || t === "vline") { this.creating = { k: "drag", one: true, d: { id: uid(), type: t, p1: pt, ...DEF_STYLE, ...this.defaults[t] } }; }
     else if (t === "long" || t === "short") {
@@ -747,7 +759,7 @@ export class ChartEngine {
     const p = this.aimPos(fp), pt = this.point(p.x, p.y), t = this.tool;
     if (this.creating?.k === "await") return this.finishCreate(pt);
     if (t === "text") { this.startCreate(p, true); this.mode = null; return; }
-    if (TWO.includes(t)) this.creating = { k: "await", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? { levels: fibDefaults(), showFill: true, reverse: false } : {}) } };
+    if (TWO.includes(t)) this.creating = { k: "await", d: { id: uid(), type: t, p1: pt, p2: { ...pt }, ...DEF_STYLE, ...this.defaults[t], ...(t === "fib" ? fibSettings() : {}) } };
     else if (t === "ruler") { this.ruler = { a: pt, b: { ...pt } }; this.creating = { k: "await", ruler: true }; }
     else {
       this.startCreate(p, true); this.mode = null; this.finishCreate(null);
@@ -910,3 +922,7 @@ export class ChartEngine {
   }
   maybeMore() { if (this.idxOf(0) < 40 && this.cb.onNeedMore) this.cb.onNeedMore(); }
 }
+
+
+
+
