@@ -1,8 +1,3 @@
-
-
-
-
-
 import { MousePointer2, Slash, MoveRight, Ruler, Magnet, Trash2, Square, Type } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 
@@ -66,11 +61,36 @@ export function DrawingProps({ sel, onChange, onDelete }) {
           <button key={size} data-testid={`drawing-font-size-${size}`} onClick={() => onChange({ fontSize: size })} className={`h-7 px-2 shrink-0 rounded text-xs ${Number(sel.fontSize || 14) === size ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>{size}</button>
         ))}
       </>}
-      {!styled && !isText && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
+      {sel.type === "fib" && <>
+        <div className="w-px h-5 bg-[#2a2e39] mx-1 shrink-0" />
+        <button data-testid="fib-reverse" onClick={() => onChange({ reverse: !sel.reverse })} className={`h-7 px-2 shrink-0 rounded text-xs ${sel.reverse ? "bg-[#2a2e39] text-white" : "text-[#b2b5be] hover:bg-[#1e222d]"}`}>Ters çevir</button>
+        <label className="flex items-center gap-1 text-xs text-[#b2b5be] shrink-0 px-1">
+          <input data-testid="fib-fill-toggle" type="checkbox" checked={sel.showFill !== false} onChange={(e) => onChange({ showFill: e.target.checked })} />
+          Arka plan
+        </label>
+        <details className="relative shrink-0">
+          <summary data-testid="fib-levels-settings" className="h-7 px-2 flex items-center rounded text-xs text-[#b2b5be] hover:bg-[#1e222d] cursor-pointer list-none">Oranlar ▾</summary>
+          <div className="absolute top-8 right-0 z-30 w-56 max-h-72 overflow-y-auto rounded-md border border-[#2a2e39] bg-[#131722] p-2 shadow-xl">
+            {(Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((level, index) => (
+              <div key={`${level.value}-${index}`} className="flex items-center gap-2 py-1">
+                <input aria-label={`${level.value} oranını göster`} data-testid={`fib-level-visible-${index}`} type="checkbox" checked={level.visible !== false} onChange={(e) => {
+                  const levels = (Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((item, i) => i === index ? { ...item, visible: e.target.checked } : item);
+                  onChange({ levels });
+                }} />
+                <span className="text-xs text-[#b2b5be] flex-1 tabular-nums">{level.value}</span>
+                <input aria-label={`${level.value} oranı rengi`} data-testid={`fib-level-color-${index}`} type="color" value={level.color || "#d1d4dc"} onChange={(e) => {
+                  const levels = (Array.isArray(sel.levels) && sel.levels.length ? sel.levels : [[0,"#787b86"],[0.236,"#f23645"],[0.382,"#ff9800"],[0.5,"#4caf50"],[0.618,"#089981"],[0.786,"#00bcd4"],[1,"#787b86"],[1.618,"#2962ff"]].map(([value,color]) => ({ value, color, visible: true }))).map((item, i) => i === index ? { ...item, color: e.target.value } : item);
+                  onChange({ levels });
+                }} className="w-7 h-6 bg-transparent" />
+              </div>
+            ))}
+          </div>
+        </details>
+      </>}
+      {!styled && !isText && sel.type !== "fib" && <span className="text-xs text-[#b2b5be] px-2">{sel.type === "long" ? "Uzun pozisyon" : "Kısa pozisyon"}</span>}
     </div>
   );
 }
-
 
 
 
