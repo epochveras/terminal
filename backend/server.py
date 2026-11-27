@@ -45,18 +45,21 @@ LAST_PRICES: Dict[str, float] = {}
 LAST_PRICE_TIMES: Dict[str, float] = {}
 PUSH_TASKS: set = set()
 
+
 # ---------------- SFP MONITOR STATE ----------------
 
 SFP_BARS: Dict[str, List[dict]] = {}
 
 SFP_INTERVAL = "30m"
-SFP_HISTORY_LIMIT = 200
+SFP_HISTORY_LIMIT = 100
 SFP_SWING_LEN = 5
 SFP_RIGHT_BARS = 1
 SFP_EMA_FAST = 38
 SFP_EMA_SLOW = 62
 
 SFP_REFRESH_SECONDS = 10
+SFP_BOOTSTRAP_RETRY_SECONDS = 60
+SFP_BOOTSTRAP_RETRY_AT: Dict[str, float] = {}
 
 
 def now_iso() -> str:
@@ -1106,8 +1109,6 @@ def epoch_sfp_conditions(bars: List[dict]) -> dict:
     swing_high = None
     swing_low = None
 
-    last_index = len(bars) - 1
-
     for i in range(len(bars)):
         if ph[i] is not None:
             swing_high = ph[i]
@@ -1115,7 +1116,7 @@ def epoch_sfp_conditions(bars: List[dict]) -> dict:
         if pl[i] is not None:
             swing_low = pl[i]
 
-    current = bars[last_index]
+    current = bars[-1]
 
     bull = False
     bear = False
@@ -1179,7 +1180,7 @@ def _parse_ws_kline(kline: dict) -> Optional[dict]:
 
 async def _load_sfp_symbol_history(symbol: str) -> int:
     """
-    SFP geçmişini Binance REST yerine MongoDB'den yükler.
+    SFP geçmişini MongoDB'den yükler.
     """
 
     try:
@@ -1211,6 +1212,163 @@ async def _load_sfp_symbol_history(symbol: str) -> int:
         return 0
 
 
+async def _bootstrap_sfp_symbol_history(symbol: str):
+    """
+    MongoDB geçmişi 100 mumdan azsa Binance'ten
+    son 100 kapanmış 30m mumu tamamlar.
+
+    Binance limitine 101 gönderilir; böylece açık mum
+    listeden çıkarıldığında 100 kapanmış mum kalabilir.
+    """
+
+    bars = SFP_BARS.get(symbol, [])
+
+    if len(bars) >= SFP_HISTORY_LIMIT:
+        return
+
+    now = time.time()
+    retry_at = SFP_BOOTSTRAP_RETRY_AT.get(symbol, 0)
+
+    if now < retry_at:
+        return
+
+    try:
+        logger.info(
+            "SFP geçmiş mumları Binance'ten alınıyor: %s mevcut=%s",
+            symbol,
+            len(bars)
+        )
+
+        data = await bget(
+            "/fapi/v1/klines",
+            {
+                "symbol": symbol,
+                "interval": SFP_INTERVAL,
+                "limit": SFP_HISTORY_LIMIT + 1
+            },
+            ttl=30
+        )
+
+        current_time_ms = int(time.time() * 1000)
+        history = []
+
+        for item in data:
+            try:
+                close_time = int(item[6])
+
+                # Henüz kapanmamış mumu dahil etme.
+                if close_time >= current_time_ms:
+                    continue
+
+                bar = {
+                    "t": int(item[0]),
+                    "o": float(item[1]),
+                    "h": float(item[2]),
+                    "l": float(item[3]),
+                    "c": float(item[4])
+                }
+
+                values = (
+                    bar["o"],
+                    bar["h"],
+                    bar["l"],
+                    bar["c"]
+                )
+
+                if any(
+                    not math.isfinite(v) or v <= 0
+                    for v in values
+                ):
+                    continue
+
+                if bar["h"] < bar["l"]:
+                    continue
+
+                history.append(bar)
+
+            except (IndexError, TypeError, ValueError):
+                continue
+
+        history.sort(key=lambda x: x["t"])
+
+        # MongoDB'de bulunan geçmişle Binance geçmişini birleştir.
+        merged = {
+            item["t"]: item
+            for item in bars
+        }
+
+        for item in history:
+            merged[item["t"]] = item
+
+        combined = sorted(
+            merged.values(),
+            key=lambda x: x["t"]
+        )[-SFP_HISTORY_LIMIT:]
+
+        if not combined:
+            logger.warning(
+                "SFP Binance geçmişi boş geldi: %s",
+                symbol
+            )
+            SFP_BOOTSTRAP_RETRY_AT[symbol] = (
+                time.time() + SFP_BOOTSTRAP_RETRY_SECONDS
+            )
+            return
+
+        # Geçmiş mumları MongoDB'ye kaydet.
+        for bar in history:
+            await db.sfp_bars.update_one(
+                {
+                    "symbol": symbol,
+                    "t": bar["t"]
+                },
+                {
+                    "$set": {
+                        "symbol": symbol,
+                        "t": bar["t"],
+                        "o": bar["o"],
+                        "h": bar["h"],
+                        "l": bar["l"],
+                        "c": bar["c"],
+                        "updated_at": now_iso()
+                    }
+                },
+                upsert=True
+            )
+
+        SFP_BARS[symbol] = combined
+        SFP_BOOTSTRAP_RETRY_AT.pop(symbol, None)
+
+        logger.info(
+            "SFP Binance geçmişi yüklendi: %s mum=%s",
+            symbol,
+            len(combined)
+        )
+
+    except HTTPException as exc:
+        SFP_BOOTSTRAP_RETRY_AT[symbol] = (
+            time.time() + SFP_BOOTSTRAP_RETRY_SECONDS
+        )
+
+        logger.warning(
+            "SFP geçmiş mumları alınamadı: %s hata=%s. "
+            "%s saniye sonra tekrar denenecek.",
+            symbol,
+            exc.detail,
+            SFP_BOOTSTRAP_RETRY_SECONDS
+        )
+
+    except Exception:
+        SFP_BOOTSTRAP_RETRY_AT[symbol] = (
+            time.time() + SFP_BOOTSTRAP_RETRY_SECONDS
+        )
+
+        logger.exception(
+            "SFP geçmiş mum yükleme hatası: %s",
+            symbol
+        )
+
+
 async def _save_sfp_closed_bar(symbol: str, bar: dict):
     """
     Yalnızca kapanmış mumları MongoDB'ye kaydeder.
@@ -1237,7 +1395,6 @@ async def _save_sfp_closed_bar(symbol: str, bar: dict):
             upsert=True
         )
 
-        # Her sembol için yalnızca son 200 kapanmış mum tutulur.
         latest = await db.sfp_bars.find(
             {"symbol": symbol},
             {"_id": 0, "t": 1}
@@ -1415,9 +1572,7 @@ async def _process_sfp_kline(
 ):
     """
     WebSocket 30m mumunu işler.
-
-    Devam eden mum bellekte güncellenir.
-    Kapanan mum MongoDB'ye kaydedilir.
+    Sinyal kontrolü yalnızca kapanmış mumda yapılır.
     """
 
     bar = _parse_ws_kline(kline)
@@ -1438,17 +1593,22 @@ async def _process_sfp_kline(
         bars[:] = bars[-SFP_HISTORY_LIMIT:]
 
     else:
-        # Eski bir mum mesajı geldiyse geçmişi geriye sarmıyoruz.
         return
 
-    # Binance kline mesajındaki x alanı mumun kapandığını belirtir.
     is_closed = bool(kline.get("x", False))
 
-    if is_closed:
-        await _save_sfp_closed_bar(symbol, bar)
+    if not is_closed:
+        return
 
-    # EMA 62 için yeterli geçmiş yoksa henüz sinyal üretme.
+    await _save_sfp_closed_bar(symbol, bar)
+
     if len(bars) < SFP_EMA_SLOW:
+        logger.info(
+            "SFP geçmiş yetersiz: %s mum=%s gerekli=%s",
+            symbol,
+            len(bars),
+            SFP_EMA_SLOW
+        )
         return
 
     users = favorite_users.get(symbol)
@@ -1467,8 +1627,13 @@ async def _process_sfp_kline(
     price = bar["c"]
     candle_time = bar["t"]
 
-    # Bullish SFP + EMA Fast > EMA Slow = LONG
     if result["bull"] and fast > slow:
+        logger.info(
+            "SFP LONG tespit edildi: %s fiyat=%s",
+            symbol,
+            price
+        )
+
         for user_id in users:
             await _send_sfp_notification(
                 user_id,
@@ -1480,8 +1645,13 @@ async def _process_sfp_kline(
                 slow
             )
 
-    # Bearish SFP + EMA Fast < EMA Slow = SHORT
     if result["bear"] and fast < slow:
+        logger.info(
+            "SFP SHORT tespit edildi: %s fiyat=%s",
+            symbol,
+            price
+        )
+
         for user_id in users:
             await _send_sfp_notification(
                 user_id,
@@ -1499,8 +1669,9 @@ async def sfp_loop():
     Favori coinleri Binance USD-M Futures 30m kline WebSocket
     üzerinden takip eder.
 
-    SFP geçmişi yalnızca MongoDB'den yüklenir.
-    Bu görev Binance REST klines isteği yapmaz.
+    Her favori coin için MongoDB geçmişi kontrol edilir.
+    100 kapanmış mum yoksa Binance REST ile tamamlanır.
+    REST koruması varsa 60 saniyede bir yeniden denenir.
     """
 
     reconnect_delay = 3
@@ -1520,11 +1691,13 @@ async def sfp_loop():
                 len(symbols)
             )
 
-            # Geçmişi MongoDB'den yükle.
-            # Daha önce kaydı olmayan semboller boş başlayacak.
+            # Her favori coin için MongoDB geçmişini yükle
+            # ve eksikse Binance geçmişiyle tamamla.
             for symbol in sorted(symbols):
                 if symbol not in SFP_BARS:
                     await _load_sfp_symbol_history(symbol)
+
+                await _bootstrap_sfp_symbol_history(symbol)
 
             streams = "/".join(
                 f"{symbol.lower()}@kline_30m"
@@ -1565,6 +1738,7 @@ async def sfp_loop():
                     except asyncio.TimeoutError:
                         raw_message = None
 
+                    # Favori listesi ve eksik geçmişler periyodik kontrol edilir.
                     if (
                         time.monotonic() - last_refresh
                         >= SFP_REFRESH_SECONDS
@@ -1578,6 +1752,11 @@ async def sfp_loop():
                                 "SFP WebSocket yenilenecek."
                             )
                             break
+
+                        # Binance koruması kalkmışsa geçmişi yeniden dene.
+                        for symbol in sorted(symbols):
+                            if len(SFP_BARS.get(symbol, [])) < SFP_HISTORY_LIMIT:
+                                await _bootstrap_sfp_symbol_history(symbol)
 
                         last_refresh = time.monotonic()
 
