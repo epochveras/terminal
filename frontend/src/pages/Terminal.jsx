@@ -132,28 +132,6 @@ function PanelBox({
   );
 }
 
-function ChartModeButton({
-  active,
-  onClick,
-  children,
-  testId,
-}) {
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      onClick={onClick}
-      className={`h-7 min-w-8 px-2 rounded text-xs font-semibold transition-colors ${
-        active
-          ? "bg-[#2962ff] text-white"
-          : "bg-[#1e222d] text-[#b2b5be] hover:text-white"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
 export default function Terminal() {
   const { user, logout } = useAuth();
 
@@ -237,9 +215,7 @@ export default function Terminal() {
               SYMBOL_CACHE_KEY,
               JSON.stringify(list)
             );
-          } catch {
-            // Cache storage is optional.
-          }
+          } catch {}
         }
       } catch (error) {
         console.warn(
@@ -267,7 +243,6 @@ export default function Terminal() {
     };
 
     load();
-
     market.start();
 
     const off = market.onStatus(setLive);
@@ -430,7 +405,7 @@ export default function Terminal() {
     return list;
   }, [favorites, symbolList, symbol, metaMap]);
 
-  // Alarm panelinden veya bildirimden seçilen coin ana grafiğe gider.
+  // Alarm panelinden seçilen coin her zaman ana grafiğe gider.
   const selectSymbol = useCallback(
     (s, keepSheetOpen = false) => {
       update({ symbol: s });
@@ -444,7 +419,7 @@ export default function Terminal() {
     [update]
   );
 
-  // Watchlist ve arama penceresi aktif grafiği değiştirir.
+  // Watchlist ve arama, aktif grafiği değiştirir.
   const selectSymbolInActiveChart = useCallback(
     (s, keepSheetOpen = false) => {
       if (twoCharts && activeChart === "second") {
@@ -713,6 +688,12 @@ export default function Terminal() {
     setSel(null);
   };
 
+  const changeChartLayout = (value) => {
+    setTwoCharts(value);
+    setActiveChart("main");
+    setSel(null);
+  };
+
   return (
     <div
       className="h-[100dvh] w-full flex flex-col bg-black overflow-hidden"
@@ -740,6 +721,9 @@ export default function Terminal() {
         live={live}
         user={user}
         logout={logout}
+        twoCharts={twoCharts}
+        onChartLayoutChange={changeChartLayout}
+        mobile={mobile}
       />
 
       <div className="flex-1 min-h-0 flex">
@@ -768,53 +752,6 @@ export default function Terminal() {
             minSize={35}
           >
             <div className="relative h-full min-h-0 flex flex-col bg-black">
-              <div
-                className="h-9 shrink-0 flex items-center gap-2 px-2 border-b border-[#1e222d] bg-[#0c0d0f]"
-                data-testid="chart-layout-toolbar"
-              >
-                <span className="text-[10px] uppercase tracking-wider text-[#787b86] mr-1">
-                  Grafik
-                </span>
-
-                <ChartModeButton
-                  active={!twoCharts}
-                  onClick={() => {
-                    setTwoCharts(false);
-                    setActiveChart("main");
-                    setSel(null);
-                  }}
-                  testId="chart-layout-one"
-                >
-                  1
-                </ChartModeButton>
-
-                {!mobile && (
-                  <ChartModeButton
-                    active={twoCharts}
-                    onClick={() => {
-                      setTwoCharts(true);
-                      setActiveChart("main");
-                      setSel(null);
-                    }}
-                    testId="chart-layout-two"
-                  >
-                    2
-                  </ChartModeButton>
-                )}
-
-                {twoCharts && !mobile && (
-                  <span className="ml-2 text-[10px] text-[#787b86]">
-                    Aktif grafik: {secondActive ? "2" : "1"}
-                  </span>
-                )}
-
-                <div className="ml-auto text-[10px] text-[#787b86]">
-                  {twoCharts && !mobile
-                    ? "İki grafik"
-                    : "Tek grafik"}
-                </div>
-              </div>
-
               <div
                 className={`flex-1 min-h-0 flex ${
                   twoCharts && !mobile
